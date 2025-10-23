@@ -587,6 +587,10 @@ type IteratorOptions struct {
 	StartTime int64
 	EndTime   int64
 
+	// Original time range before padding for moving functions
+	OriginalStartTime int64
+	OriginalEndTime   int64
+
 	// Sorted in time ascending order if true.
 	Ascending bool
 

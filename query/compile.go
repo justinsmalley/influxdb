@@ -285,6 +285,8 @@ func (c *compiledField) compileExpr(expr influxql.Expr) error {
 			return c.compileCumulativeSum(expr.Args)
 		case "moving_average":
 			return c.compileMovingAverage(expr.Args)
+		case "moving_median":
+			return c.compileMovingAverage(expr.Args) // reuse validation logic
 		case "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative":
 			return c.compileExponentialMovingAverage(expr.Name, expr.Args)
 		case "kaufmans_efficiency_ratio", "kaufmans_adaptive_moving_average":
@@ -565,8 +567,8 @@ func (c *compiledField) compileCumulativeSum(args []influxql.Expr) error {
 }
 
 func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
-	if got := len(args); got != 2 {
-		return fmt.Errorf("invalid number of arguments for moving_average, expected 2, got %d", got)
+	if got := len(args); got < 2 || got > 4 {
+		return fmt.Errorf("invalid number of arguments for moving_average, expected 2 to 4, got %d", got)
 	}
 
 	arg1, ok := args[1].(*influxql.IntegerLiteral)
@@ -575,6 +577,27 @@ func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
 	} else if arg1.Val <= 1 {
 		return fmt.Errorf("moving_average window must be greater than 1, got %d", arg1.Val)
 	}
+	
+	// Validate minPeriods if provided
+	if len(args) >= 3 {
+		arg2, ok := args[2].(*influxql.IntegerLiteral)
+		if !ok {
+			return fmt.Errorf("third argument for moving_average must be an integer, got %T", args[2])
+		} else if arg2.Val < 1 {
+			return fmt.Errorf("moving_average min_periods must be at least 1, got %d", arg2.Val)
+		} else if arg2.Val > arg1.Val {
+			return fmt.Errorf("moving_average min_periods cannot be greater than window size, got %d", arg2.Val)
+		}
+	}
+	
+	// Validate center if provided
+	if len(args) >= 4 {
+		_, ok := args[3].(*influxql.BooleanLiteral)
+		if !ok {
+			return fmt.Errorf("fourth argument for moving_average must be a boolean, got %T", args[3])
+		}
+	}
+	
 	c.global.OnlySelectors = false
 	if c.global.ExtraIntervals < int(arg1.Val) {
 		c.global.ExtraIntervals = int(arg1.Val)
