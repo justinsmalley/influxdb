@@ -1462,6 +1462,21 @@ func (m *measurement) SetFieldName(name string) {
 	m.mu.Unlock()
 }
 
+// RemoveFieldName removes the field name from the measurement.
+func (m *measurement) RemoveFieldName(name string) {
+	m.mu.Lock()
+	delete(m.fieldNames, name)
+	m.mu.Unlock()
+}
+
+// RenameFieldName renames a field name in the measurement.
+func (m *measurement) RenameFieldName(oldName, newName string) {
+	m.mu.Lock()
+	delete(m.fieldNames, oldName)
+	m.fieldNames[newName] = struct{}{}
+	m.mu.Unlock()
+}
+
 // SeriesByTagKeyValue returns the TagKeyValue for the provided tag key.
 func (m *measurement) SeriesByTagKeyValue(key string) *tagKeyValue {
 	m.mu.RLock()

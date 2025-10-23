@@ -2,6 +2,8 @@ module github.com/influxdata/influxdb
 
 go 1.13
 
+replace github.com/influxdata/influxql => ../influxql
+
 require (
 	cloud.google.com/go/bigtable v1.2.0 // indirect
 	collectd.org v0.3.0
@@ -18,7 +20,7 @@ require (
 	github.com/glycerine/goconvey v0.0.0-20190410193231-58a59202ab31 // indirect
 	github.com/gogo/protobuf v1.1.1
 	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db
-	github.com/google/go-cmp v0.4.0
+	github.com/google/go-cmp v0.7.0
 	github.com/influxdata/flux v0.50.2
 	github.com/influxdata/influxql v1.0.1
 	github.com/influxdata/roaring v0.4.13-0.20180809181101-fc520f41fab6
@@ -53,4 +55,5 @@ require (
 	golang.org/x/time v0.0.0-20190308202827-9d24e82272b4
 	gonum.org/v1/gonum v0.6.0 // indirect
 	google.golang.org/grpc v1.26.0
+	google.golang.org/protobuf v1.36.10
 )

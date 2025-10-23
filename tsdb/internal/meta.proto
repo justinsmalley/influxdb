@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package tsdb;
 
+option go_package = "github.com/influxdata/influxdb/tsdb/internal";
+
 //========================================================================
 //
 // Metadata
@@ -21,11 +23,25 @@ message Tag {
 message MeasurementFields {
   bytes Name = 1;
   repeated Field Fields = 2;
+  repeated FieldMapping Mappings = 3;  // NEW
 }
 
 message Field {
   bytes Name = 1;
   int32 Type = 2;
+}
+
+message FieldMapping {
+  string UserName = 1;        // User-facing name
+  string InternalName = 2;    // Internal storage name (seriesKey#!~#internalName)
+  int64 Version = 3;          // Monotonic version counter
+  FieldMappingState State = 4;
+}
+
+enum FieldMappingState {
+  ACTIVE = 0;
+  DELETED = 1;
+  RENAMED = 2;
 }
 
 message MeasurementFieldSet {

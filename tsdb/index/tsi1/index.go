@@ -1113,6 +1113,12 @@ func (i *Index) RetainFileSet() (*FileSet, error) {
 // SetFieldName is a no-op on this index.
 func (i *Index) SetFieldName(measurement []byte, name string) {}
 
+// RemoveFieldName is a no-op on this index.
+func (i *Index) RemoveFieldName(measurement []byte, name string) {}
+
+// RenameFieldName is a no-op on this index.
+func (i *Index) RenameFieldName(measurement []byte, oldName, newName string) {}
+
 // Rebuild rebuilds an index. It's a no-op for this index.
 func (i *Index) Rebuild() {}
 

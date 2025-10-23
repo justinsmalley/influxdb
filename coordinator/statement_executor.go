@@ -140,6 +140,16 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
 		}
 		err = e.executeDropUserStatement(stmt)
+	case *influxql.DropFieldStatement:
+		if ctx.ReadOnly {
+			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
+		}
+		err = e.executeDropFieldStatement(stmt)
+	case *influxql.RenameFieldStatement:
+		if ctx.ReadOnly {
+			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
+		}
+		err = e.executeRenameFieldStatement(stmt)
 	case *influxql.ExplainStatement:
 		if stmt.Analyze {
 			rows, err = e.executeExplainAnalyzeStatement(stmt, ctx)
@@ -406,6 +416,40 @@ func (e *StatementExecutor) executeDropSubscriptionStatement(q *influxql.DropSub
 
 func (e *StatementExecutor) executeDropUserStatement(q *influxql.DropUserStatement) error {
 	return e.MetaClient.DropUser(q.Name)
+}
+
+// executeDropFieldStatement executes a DROP FIELD statement
+func (e *StatementExecutor) executeDropFieldStatement(q *influxql.DropFieldStatement) error {
+	return e.DropField(q.Database, q.Measurement, q.Name)
+}
+
+// executeRenameFieldStatement executes an ALTER MEASUREMENT RENAME FIELD statement
+func (e *StatementExecutor) executeRenameFieldStatement(q *influxql.RenameFieldStatement) error {
+	return e.RenameField(q.Database, q.Measurement, q.OldName, q.NewName)
+}
+
+// Field operation methods
+
+// DropField soft deletes a field from a measurement across all shards
+func (e *StatementExecutor) DropField(database, measurement, fieldName string) error {
+	if dbi := e.MetaClient.Database(database); dbi == nil {
+		return query.ErrDatabaseNotFound(database)
+	}
+
+	// TODO: Implement proper shard access through TSDBStore interface
+	// For now, this is a proof-of-concept implementation
+	return fmt.Errorf("DropField not yet implemented - requires shard access methods")
+}
+
+// RenameField renames a field in a measurement across all shards
+func (e *StatementExecutor) RenameField(database, measurement, oldName, newName string) error {
+	if dbi := e.MetaClient.Database(database); dbi == nil {
+		return query.ErrDatabaseNotFound(database)
+	}
+
+	// TODO: Implement proper shard access through TSDBStore interface
+	// For now, this is a proof-of-concept implementation
+	return fmt.Errorf("RenameField not yet implemented - requires shard access methods")
 }
 
 func (e *StatementExecutor) executeExplainStatement(q *influxql.ExplainStatement, ctx *query.ExecutionContext) (models.Rows, error) {

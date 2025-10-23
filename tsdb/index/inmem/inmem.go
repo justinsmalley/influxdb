@@ -868,6 +868,24 @@ func (i *Index) SetFieldName(measurement []byte, name string) {
 	m.SetFieldName(name)
 }
 
+// RemoveFieldName removes a field name from a measurement.
+func (i *Index) RemoveFieldName(measurement []byte, name string) {
+	m, err := i.Measurement(measurement)
+	if err != nil || m == nil {
+		return
+	}
+	m.RemoveFieldName(name)
+}
+
+// RenameFieldName renames a field name in a measurement.
+func (i *Index) RenameFieldName(measurement []byte, oldName, newName string) {
+	m, err := i.Measurement(measurement)
+	if err != nil || m == nil {
+		return
+	}
+	m.RenameFieldName(oldName, newName)
+}
+
 // ForEachMeasurementName iterates over each measurement name.
 func (i *Index) ForEachMeasurementName(fn func(name []byte) error) error {
 	i.mu.RLock()

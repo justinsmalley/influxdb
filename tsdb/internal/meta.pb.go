@@ -131,11 +131,12 @@ func (m *Tag) GetValue() string {
 }
 
 type MeasurementFields struct {
-	Name                 []byte   `protobuf:"bytes,1,opt,name=Name,proto3" json:"Name,omitempty"`
-	Fields               []*Field `protobuf:"bytes,2,rep,name=Fields" json:"Fields,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+	Name                 []byte           `protobuf:"bytes,1,opt,name=Name,proto3" json:"Name,omitempty"`
+	Fields               []*Field         `protobuf:"bytes,2,rep,name=Fields" json:"Fields,omitempty"`
+	Mappings              []*FieldMapping  `protobuf:"bytes,3,rep,name=Mappings" json:"Mappings,omitempty"`
+	XXX_NoUnkeyedLiteral  struct{}         `json:"-"`
+	XXX_unrecognized      []byte           `json:"-"`
+	XXX_sizecache         int32            `json:"-"`
 }
 
 func (m *MeasurementFields) Reset()         { *m = MeasurementFields{} }
@@ -181,6 +182,13 @@ func (m *MeasurementFields) GetName() []byte {
 func (m *MeasurementFields) GetFields() []*Field {
 	if m != nil {
 		return m.Fields
+	}
+	return nil
+}
+
+func (m *MeasurementFields) GetMappings() []*FieldMapping {
+	if m != nil {
+		return m.Mappings
 	}
 	return nil
 }
@@ -238,6 +246,74 @@ func (m *Field) GetType() int32 {
 		return m.Type
 	}
 	return 0
+}
+
+// FieldMappingState represents the state of a field mapping
+type FieldMappingState int32
+
+const (
+	FieldMappingState_ACTIVE  FieldMappingState = 0
+	FieldMappingState_DELETED FieldMappingState = 1
+	FieldMappingState_RENAMED FieldMappingState = 2
+)
+
+var FieldMappingState_name = map[int32]string{
+	0: "ACTIVE",
+	1: "DELETED",
+	2: "RENAMED",
+}
+
+var FieldMappingState_value = map[string]int32{
+	"ACTIVE":  0,
+	"DELETED": 1,
+	"RENAMED": 2,
+}
+
+func (x FieldMappingState) String() string {
+	return FieldMappingState_name[int32(x)]
+}
+
+// FieldMapping represents a mapping between user-facing field names and internal storage names
+type FieldMapping struct {
+	UserName              string            `protobuf:"bytes,1,opt,name=UserName,proto3" json:"UserName,omitempty"`
+	InternalName          string            `protobuf:"bytes,2,opt,name=InternalName,proto3" json:"InternalName,omitempty"`
+	Version               int64             `protobuf:"varint,3,opt,name=Version,proto3" json:"Version,omitempty"`
+	State                 FieldMappingState `protobuf:"varint,4,opt,name=State,proto3,enum=tsdb.FieldMappingState" json:"State,omitempty"`
+	XXX_NoUnkeyedLiteral  struct{}          `json:"-"`
+	XXX_unrecognized      []byte            `json:"-"`
+	XXX_sizecache         int32             `json:"-"`
+}
+
+func (m *FieldMapping) Reset()         { *m = FieldMapping{} }
+func (m *FieldMapping) String() string { return proto.CompactTextString(m) }
+func (*FieldMapping) ProtoMessage()    {}
+
+func (m *FieldMapping) GetUserName() string {
+	if m != nil {
+		return m.UserName
+	}
+	return ""
+}
+
+func (m *FieldMapping) GetInternalName() string {
+	if m != nil {
+		return m.InternalName
+	}
+	return ""
+}
+
+func (m *FieldMapping) GetVersion() int64 {
+	if m != nil {
+		return m.Version
+	}
+	return 0
+}
+
+func (m *FieldMapping) GetState() FieldMappingState {
+	if m != nil {
+		return m.State
+	}
+	return FieldMappingState_ACTIVE
 }
 
 type MeasurementFieldSet struct {
