@@ -2337,6 +2337,9 @@ func (e *Engine) CreateIterator(ctx context.Context, measurement string, opt que
 		defer group.GetTimer(planningTimer).UpdateSince(start)
 	}
 
+	// Translate field names from user-facing to internal names
+	opt = e.translateFieldNamesInOptions(measurement, opt)
+
 	if call, ok := opt.Expr.(*influxql.Call); ok {
 		if opt.Interval.IsZero() {
 			if call.Name == "first" || call.Name == "last" {
@@ -2368,6 +2371,70 @@ func (e *Engine) CreateIterator(ctx context.Context, measurement string, opt que
 		return nil, err
 	}
 	return newMergeFinalizerIterator(ctx, itrs, opt, e.logger)
+}
+
+// translateFieldNamesInOptions translates field names in the iterator options from user-facing to internal names
+func (e *Engine) translateFieldNamesInOptions(measurement string, opt query.IteratorOptions) query.IteratorOptions {
+	// Get the measurement fields
+	mf := e.MeasurementFields([]byte(measurement))
+	if mf == nil {
+		return opt
+	}
+
+	// Translate the expression
+	opt.Expr = e.translateExpr(opt.Expr, mf)
+
+	// Translate auxiliary fields
+	for i, aux := range opt.Aux {
+		if internalName, isActive := mf.GetInternalFieldName(aux.Val); isActive {
+			opt.Aux[i].Val = internalName
+		}
+	}
+
+	// Translate WHERE clause condition
+	opt.Condition = e.translateExpr(opt.Condition, mf)
+
+	return opt
+}
+
+// translateExpr translates field names in an expression from user-facing to internal names
+func (e *Engine) translateExpr(expr influxql.Expr, mf *tsdb.MeasurementFields) influxql.Expr {
+	if expr == nil {
+		return nil
+	}
+
+	switch expr := expr.(type) {
+	case *influxql.VarRef:
+		// Translate the field name
+		if internalName, isActive := mf.GetInternalFieldName(expr.Val); isActive {
+			// Create a new VarRef with the internal name
+			newExpr := *expr
+			newExpr.Val = internalName
+			return &newExpr
+		}
+		return expr
+	case *influxql.Call:
+		// Translate field names in the call arguments
+		newCall := *expr
+		newCall.Args = make([]influxql.Expr, len(expr.Args))
+		for i, arg := range expr.Args {
+			newCall.Args[i] = e.translateExpr(arg, mf)
+		}
+		return &newCall
+	case *influxql.BinaryExpr:
+		// Translate field names in binary expressions (e.g., WHERE clauses)
+		newBinary := *expr
+		newBinary.LHS = e.translateExpr(expr.LHS, mf)
+		newBinary.RHS = e.translateExpr(expr.RHS, mf)
+		return &newBinary
+	case *influxql.ParenExpr:
+		// Translate field names in parenthesized expressions
+		newParen := *expr
+		newParen.Expr = e.translateExpr(expr.Expr, mf)
+		return &newParen
+	default:
+		return expr
+	}
 }
 
 type indexTagSets interface {

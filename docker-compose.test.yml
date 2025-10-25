@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # Stock InfluxDB 1.7.11 for comparison
+  influxdb-stock:
+    image: influxdb:1.7.11
+    container_name: influxdb-stock
+    ports:
+      - "8087:8086"
+    volumes:
+      - influxdb-stock-data:/var/lib/influxdb
+    environment:
+      - INFLUXDB_DB=testdb
+      - INFLUXDB_HTTP_AUTH_ENABLED=false
+      - INFLUXDB_REPORTING_DISABLED=true
+    networks:
+      - influx-test
+
+  # Modified InfluxDB with field mapping
+  influxdb-modified:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    image: influxdb-field-mapping:1.7.11-custom
+    container_name: influxdb-modified
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-modified-data:/var/lib/influxdb
+      - ./test-data:/test-data
+    environment:
+      - INFLUXDB_DB=testdb
+      - INFLUXDB_HTTP_AUTH_ENABLED=false
+      - INFLUXDB_REPORTING_DISABLED=true
+    networks:
+      - influx-test
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-test
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    networks:
+      - influx-test
+    depends_on:
+      - influxdb-modified
+      - influxdb-stock
+
+volumes:
+  influxdb-stock-data:
+  influxdb-modified-data:
+  grafana-data:
+
+networks:
+  influx-test:
+    driver: bridge

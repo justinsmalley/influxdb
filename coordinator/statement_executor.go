@@ -144,12 +144,12 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 		if ctx.ReadOnly {
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
 		}
-		err = e.executeDropFieldStatement(stmt)
+		err = e.executeDropFieldStatement(stmt, ctx.Database)
 	case *influxql.RenameFieldStatement:
 		if ctx.ReadOnly {
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
 		}
-		err = e.executeRenameFieldStatement(stmt)
+		err = e.executeRenameFieldStatement(stmt, ctx.Database)
 	case *influxql.ExplainStatement:
 		if stmt.Analyze {
 			rows, err = e.executeExplainAnalyzeStatement(stmt, ctx)
@@ -419,13 +419,23 @@ func (e *StatementExecutor) executeDropUserStatement(q *influxql.DropUserStateme
 }
 
 // executeDropFieldStatement executes a DROP FIELD statement
-func (e *StatementExecutor) executeDropFieldStatement(q *influxql.DropFieldStatement) error {
-	return e.DropField(q.Database, q.Measurement, q.Name)
+func (e *StatementExecutor) executeDropFieldStatement(q *influxql.DropFieldStatement, database string) error {
+	// Use the database from the statement if provided, otherwise use the context database
+	db := q.Database
+	if db == "" {
+		db = database
+	}
+	return e.DropField(db, q.Measurement, q.Name)
 }
 
 // executeRenameFieldStatement executes an ALTER MEASUREMENT RENAME FIELD statement
-func (e *StatementExecutor) executeRenameFieldStatement(q *influxql.RenameFieldStatement) error {
-	return e.RenameField(q.Database, q.Measurement, q.OldName, q.NewName)
+func (e *StatementExecutor) executeRenameFieldStatement(q *influxql.RenameFieldStatement, database string) error {
+	// Use the database from the statement if provided, otherwise use the context database
+	db := q.Database
+	if db == "" {
+		db = database
+	}
+	return e.RenameField(db, q.Measurement, q.OldName, q.NewName)
 }
 
 // Field operation methods
@@ -436,9 +446,72 @@ func (e *StatementExecutor) DropField(database, measurement, fieldName string) e
 		return query.ErrDatabaseNotFound(database)
 	}
 
-	// TODO: Implement proper shard access through TSDBStore interface
-	// For now, this is a proof-of-concept implementation
-	return fmt.Errorf("DropField not yet implemented - requires shard access methods")
+	// Cast MetaClient to *meta.Client to access ShardIDs
+	metaClient, ok := e.MetaClient.(*meta.Client)
+	if !ok {
+		return fmt.Errorf("MetaClient is not a *meta.Client")
+	}
+
+	// Get all shard IDs
+	allShardIDs := metaClient.ShardIDs()
+	if len(allShardIDs) == 0 {
+		return fmt.Errorf("no shards found")
+	}
+
+	// Cast TSDBStore to *tsdb.Store to access ShardGroup
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+	}
+
+	// Get shards from the store
+	shards := store.ShardGroup(allShardIDs).(tsdb.Shards)
+	if len(shards) == 0 {
+		return fmt.Errorf("no shards available for database %s", database)
+	}
+
+	// Perform field operation on all shards
+	var lastErr error
+	successCount := 0
+	for _, shard := range shards {
+		engine, err := shard.Engine()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		mf := engine.MeasurementFields([]byte(measurement))
+		if mf == nil {
+			continue // Measurement doesn't exist on this shard
+		}
+
+		if err := mf.SoftDeleteField(fieldName); err != nil {
+			// Skip shards where the field doesn't exist (it might only exist on some shards)
+			if strings.Contains(err.Error(), "does not exist") {
+				continue
+			}
+			lastErr = err
+			continue
+		}
+
+		// Save the field mappings
+		if err := engine.MeasurementFieldSet().Save(); err != nil {
+			lastErr = err
+			continue
+		}
+
+		successCount++
+	}
+
+	// If the operation didn't succeed on any shard, return an error
+	if successCount == 0 {
+		if lastErr != nil {
+			return lastErr
+		}
+		return fmt.Errorf("field %s not found in measurement %s", fieldName, measurement)
+	}
+
+	return lastErr
 }
 
 // RenameField renames a field in a measurement across all shards
@@ -447,9 +520,72 @@ func (e *StatementExecutor) RenameField(database, measurement, oldName, newName 
 		return query.ErrDatabaseNotFound(database)
 	}
 
-	// TODO: Implement proper shard access through TSDBStore interface
-	// For now, this is a proof-of-concept implementation
-	return fmt.Errorf("RenameField not yet implemented - requires shard access methods")
+	// Cast MetaClient to *meta.Client to access ShardIDs
+	metaClient, ok := e.MetaClient.(*meta.Client)
+	if !ok {
+		return fmt.Errorf("MetaClient is not a *meta.Client")
+	}
+
+	// Get all shard IDs
+	allShardIDs := metaClient.ShardIDs()
+	if len(allShardIDs) == 0 {
+		return fmt.Errorf("no shards found")
+	}
+
+	// Cast TSDBStore to *tsdb.Store to access ShardGroup
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+	}
+
+	// Get shards from the store
+	shards := store.ShardGroup(allShardIDs).(tsdb.Shards)
+	if len(shards) == 0 {
+		return fmt.Errorf("no shards available for database %s", database)
+	}
+
+	// Perform field operation on all shards
+	var lastErr error
+	successCount := 0
+	for _, shard := range shards {
+		engine, err := shard.Engine()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		mf := engine.MeasurementFields([]byte(measurement))
+		if mf == nil {
+			continue // Measurement doesn't exist on this shard
+		}
+
+		if err := mf.RenameField(oldName, newName); err != nil {
+			// Skip shards where the field doesn't exist (it might only exist on some shards)
+			if strings.Contains(err.Error(), "does not exist") {
+				continue
+			}
+			lastErr = err
+			continue
+		}
+
+		// Save the field mappings
+		if err := engine.MeasurementFieldSet().Save(); err != nil {
+			lastErr = err
+			continue
+		}
+
+		successCount++
+	}
+
+	// If the operation didn't succeed on any shard, return an error
+	if successCount == 0 {
+		if lastErr != nil {
+			return lastErr
+		}
+		return fmt.Errorf("field %s not found in measurement %s", oldName, measurement)
+	}
+
+	return lastErr
 }
 
 func (e *StatementExecutor) executeExplainStatement(q *influxql.ExplainStatement, ctx *query.ExecutionContext) (models.Rows, error) {
@@ -623,6 +759,11 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 			}
 			writeN += n
 			continue
+		}
+
+		// Translate field names in the result row from internal names to user-facing names
+		if err := e.translateResultFieldNames(row, ctx.Database); err != nil {
+			return err
 		}
 
 		result := &query.Result{
@@ -1426,6 +1567,69 @@ var _ TSDBStore = LocalTSDBStore{}
 // to satisfy the TSDBStore interface.
 type LocalTSDBStore struct {
 	*tsdb.Store
+}
+
+// translateResultFieldNames translates internal field names in the result row to user-facing names
+func (e *StatementExecutor) translateResultFieldNames(row *models.Row, database string) error {
+	if row == nil || len(row.Columns) == 0 {
+		return nil
+	}
+
+	// Get the measurement name from the row
+	measurementName := row.Name
+	if measurementName == "" {
+		return nil
+	}
+
+	// Cast TSDBStore to LocalTSDBStore to access shard methods
+	localStore, ok := e.TSDBStore.(*LocalTSDBStore)
+	if !ok {
+		// If not a LocalTSDBStore, we can't access field mappings
+		return nil
+	}
+
+	// Get all shard IDs
+	shardIDs := localStore.ShardIDs()
+	for _, shardID := range shardIDs {
+		shard := localStore.Shard(shardID)
+		if shard == nil {
+			continue
+		}
+
+		// Check if this shard has the measurement
+		engine, err := shard.Engine()
+		if err != nil {
+			continue
+		}
+
+		mf := engine.MeasurementFields([]byte(measurementName))
+		if mf == nil {
+			continue
+		}
+
+		// Translate column names
+		translatedColumns := make([]string, len(row.Columns))
+		for i, colName := range row.Columns {
+			if colName == "time" {
+				// Time column doesn't need translation
+				translatedColumns[i] = colName
+			} else {
+				// Translate field name from internal to user-facing
+				userName, exists := mf.GetUserFieldName(colName)
+				if exists {
+					translatedColumns[i] = userName
+				} else {
+					// No mapping found, use original name
+					translatedColumns[i] = colName
+				}
+			}
+		}
+
+		row.Columns = translatedColumns
+		break
+	}
+
+	return nil
 }
 
 // ShardIteratorCreator is an interface for creating an IteratorCreator to access a specific shard.

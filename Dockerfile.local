@@ -1,0 +1,38 @@
+# Use InfluxDB 1.7.11 as base for compatibility
+FROM influxdb:1.7.11 as base
+
+# Builder stage with Go 1.20 (compatible with InfluxDB 1.7.11)
+FROM golang:1.20-bullseye AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y git make bash gcc && rm -rf /var/lib/apt/lists/*
+
+# Copy source code
+WORKDIR /src
+COPY influxdb/ .
+
+# Copy the modified influxql package
+COPY influxql/ /influxql
+
+# Build modified InfluxDB
+RUN go mod edit -replace google.golang.org/protobuf=google.golang.org/protobuf@v1.28.1 && \
+    go mod tidy && \
+    CGO_ENABLED=0 go build -ldflags="-s -w" -o /influxd ./cmd/influxd
+
+# Final runtime image based on InfluxDB 1.7.11
+FROM influxdb:1.7.11
+
+# Replace the stock influxd with our modified version
+COPY --from=builder /influxd /usr/bin/influxd
+
+# Ensure proper permissions
+RUN chmod +x /usr/bin/influxd
+
+# Use the same entrypoint and config as stock InfluxDB 1.7.11
+# This ensures compatibility with existing scripts and tools
+
+EXPOSE 8086
+
+# Keep the original InfluxDB entrypoint
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["influxd"]

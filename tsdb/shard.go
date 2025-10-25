@@ -720,7 +720,13 @@ func (s *Shard) translateFieldNames(point models.Point, mf *MeasurementFields) (
 		// Get internal field name
 		internalName, isActive := mf.GetInternalFieldName(fieldName)
 		if !isActive {
-			return nil, fmt.Errorf("field %s is not active", fieldName)
+			// Field mapping exists but is not active (renamed/deleted)
+			// Create a new field mapping for this user name
+			var err error
+			internalName, err = mf.CreateFieldMapping(fieldName)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create field mapping for %s: %w", fieldName, err)
+			}
 		}
 
 		translatedFields[internalName] = value
@@ -1583,6 +1589,11 @@ func (m *MeasurementFields) bytes() int {
 // Returns an error if 255 fields have already been created on the measurement or
 // the fields already exists with a different type.
 func (m *MeasurementFields) CreateFieldIfNotExists(name []byte, typ influxql.DataType) error {
+	// Validate field name
+	if err := ValidateFieldName(string(name)); err != nil {
+		return fmt.Errorf("invalid field name: %w", err)
+	}
+
 	fields := m.fields.Load().(map[string]*Field)
 
 	// Ignore if the field already exists.
@@ -1632,19 +1643,33 @@ func (m *MeasurementFields) Field(name string) *Field {
 		return nil
 	}
 
+	// DEBUG: Print field lookup
+	fmt.Fprintf(os.Stderr, "DEBUG Field lookup: looking for field '%s'\n", name)
+
 	// Try to translate user-facing field name to internal name
 	internalName, isActive := m.GetInternalFieldName(name)
 	if isActive {
+		fmt.Fprintf(os.Stderr, "DEBUG Field lookup: translated '%s' -> '%s' (active)\n", name, internalName)
 		// Look up field using internal name
 		f := m.fields.Load().(map[string]*Field)[internalName]
 		if f != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG Field lookup: found field '%s' with type %d\n", internalName, f.Type)
 			return f
+		} else {
+			fmt.Fprintf(os.Stderr, "DEBUG Field lookup: field '%s' not found\n", internalName)
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "DEBUG Field lookup: no mapping for '%s'\n", name)
 	}
 
 	// If no mapping exists, treat as implicit identity mapping (existing fields)
 	// This handles fields that existed before field mapping was introduced
 	f := m.fields.Load().(map[string]*Field)[name]
+	if f != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG Field lookup: found implicit field '%s' with type %d\n", name, f.Type)
+	} else {
+		fmt.Fprintf(os.Stderr, "DEBUG Field lookup: implicit field '%s' not found\n", name)
+	}
 	return f
 }
 
@@ -1715,18 +1740,12 @@ func (m *MeasurementFields) FieldSet() map[string]influxql.DataType {
 }
 
 func (m *MeasurementFields) ForEachField(fn func(name string, typ influxql.DataType) bool) {
-	// Iterate over user-facing field names instead of internal names
-	activeFields := m.GetActiveUserFields()
-	for _, userName := range activeFields {
-		// Get the internal name to look up the field type
-		internalName, isActive := m.GetInternalFieldName(userName)
-		if isActive {
-			f := m.fields.Load().(map[string]*Field)[internalName]
-			if f != nil {
-				if !fn(userName, f.Type) {
-					return
-				}
-			}
+	// Iterate over INTERNAL field names (not user-facing names)
+	// This is used for persistence, so we need to save the actual field names
+	fields := m.fields.Load().(map[string]*Field)
+	for fieldName, field := range fields {
+		if !fn(fieldName, field.Type) {
+			return
 		}
 	}
 }
@@ -1782,11 +1801,23 @@ func (m *MeasurementFields) GetActiveUserFields() []string {
 
 	activeFields := make([]string, 0, len(fields))
 
+	// Build a set of internal names that have explicit mappings
+	internalNamesWithMappings := make(map[string]bool)
+	for _, mapping := range mappings {
+		internalNamesWithMappings[mapping.InternalName] = true
+	}
+
 	// First, add all fields that have no explicit mapping (implicit identity)
 	for fieldName := range fields {
-		if _, hasMapping := mappings[fieldName]; !hasMapping {
-			activeFields = append(activeFields, fieldName)
+		// Skip if this field has an explicit mapping (either as user name or internal name)
+		if _, hasMapping := mappings[fieldName]; hasMapping {
+			continue
 		}
+		// Skip if this field name is used as an internal name in any mapping
+		if internalNamesWithMappings[fieldName] {
+			continue
+		}
+		activeFields = append(activeFields, fieldName)
 	}
 
 	// Then, add fields with active mappings
@@ -1834,6 +1865,11 @@ func (m *MeasurementFields) SoftDeleteField(userName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Validation already done on creation, but check for safety
+	if err := ValidateFieldName(userName); err != nil {
+		return fmt.Errorf("invalid field name: %w", err)
+	}
+
 	mappings := m.mappings.Load().(map[string]*FieldMapping)
 
 	// Check if field exists and is active
@@ -1874,6 +1910,14 @@ func (m *MeasurementFields) SoftDeleteField(userName string) error {
 func (m *MeasurementFields) RenameField(oldName, newName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Validate both names
+	if err := ValidateFieldName(oldName); err != nil {
+		return fmt.Errorf("invalid old field name: %w", err)
+	}
+	if err := ValidateFieldName(newName); err != nil {
+		return fmt.Errorf("invalid new field name: %w", err)
+	}
 
 	mappings := m.mappings.Load().(map[string]*FieldMapping)
 
@@ -1938,24 +1982,48 @@ func (m *MeasurementFields) RenameField(oldName, newName string) error {
 func (m *MeasurementFields) CreateFieldMapping(userName string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
+	// ADD VALIDATION
+	if err := ValidateFieldName(userName); err != nil {
+		return "", fmt.Errorf("invalid field name: %w", err)
+	}
+
 	mappings := m.mappings.Load().(map[string]*FieldMapping)
-	
+	fields := m.fields.Load().(map[string]*Field)
+
 	// Check if there's already an active field with this user name
 	if existingMapping, exists := mappings[userName]; exists && existingMapping.State == FieldMappingState_ACTIVE {
 		return "", fmt.Errorf("field '%s' already exists and is active", userName)
 	}
-	
-	// Find next version number
+
+	// Find next version number and handle legacy field collisions
 	nextVersion := int64(2) // Start from v2 since v1 is implicit
 	for _, mapping := range mappings {
 		if mapping.UserName == userName && mapping.Version >= nextVersion {
 			nextVersion = mapping.Version + 1
 		}
 	}
-	
+
+	// Keep incrementing version until we find one that doesn't collide with legacy fields
+	for {
+		internalName := fmt.Sprintf("%s.v%d", userName, nextVersion)
+
+		// Check if this versioned internal name already exists as a legacy field
+		if _, legacyExists := fields[internalName]; legacyExists {
+			// Check if it has an implicit mapping (no explicit mapping entry)
+			if _, hasMappingEntry := mappings[internalName]; !hasMappingEntry {
+				// This is a legacy field collision - try next version
+				nextVersion++
+				continue
+			}
+		}
+
+		// No collision found, use this internal name
+		break
+	}
+
 	internalName := fmt.Sprintf("%s.v%d", userName, nextVersion)
-	
+
 	// Create new mapping
 	newMapping := &FieldMapping{
 		UserName:     userName,
@@ -1963,7 +2031,7 @@ func (m *MeasurementFields) CreateFieldMapping(userName string) (string, error) 
 		Version:      nextVersion,
 		State:        FieldMappingState_ACTIVE,
 	}
-	
+
 	// Update mappings
 	newMappings := make(map[string]*FieldMapping, len(mappings)+1)
 	for k, v := range mappings {
@@ -1971,9 +2039,8 @@ func (m *MeasurementFields) CreateFieldMapping(userName string) (string, error) 
 	}
 	newMappings[userName] = newMapping
 	m.mappings.Store(newMappings)
-	
+
 	// Create the internal field if it doesn't exist
-	fields := m.fields.Load().(map[string]*Field)
 	if _, exists := fields[internalName]; !exists {
 		// Create a new field with the versioned internal name
 		// We need to determine the field type - for now, default to Float
@@ -1981,7 +2048,7 @@ func (m *MeasurementFields) CreateFieldMapping(userName string) (string, error) 
 			Name: internalName,
 			Type: influxql.Float, // Default type, could be made configurable
 		}
-		
+
 		newFields := make(map[string]*Field, len(fields)+1)
 		for k, v := range fields {
 			newFields[k] = v
@@ -1989,7 +2056,7 @@ func (m *MeasurementFields) CreateFieldMapping(userName string) (string, error) 
 		newFields[internalName] = newField
 		m.fields.Store(newFields)
 	}
-	
+
 	return internalName, nil
 }
 
@@ -2135,6 +2202,13 @@ func (fs *MeasurementFieldSet) saveNoLock() error {
 
 		// Serialize mappings
 		mappings := mf.mappings.Load().(map[string]*FieldMapping)
+		// DEBUG: Print mappings being saved
+		if len(mappings) > 0 {
+			fmt.Fprintf(os.Stderr, "DEBUG Save: Saving %d mappings for measurement %s\n", len(mappings), name)
+			for userName, mapping := range mappings {
+				fmt.Fprintf(os.Stderr, "  %s -> %s (v%d, state %d)\n", userName, mapping.InternalName, mapping.Version, mapping.State)
+			}
+		}
 		for _, mapping := range mappings {
 			fs.Mappings = append(fs.Mappings, &internal.FieldMapping{
 				UserName:     mapping.UserName,
@@ -2145,12 +2219,26 @@ func (fs *MeasurementFieldSet) saveNoLock() error {
 		}
 
 		pb.Measurements = append(pb.Measurements, fs)
+
+		// DEBUG: Print what's in the protobuf message
+		if len(fs.Mappings) > 0 {
+			fmt.Fprintf(os.Stderr, "DEBUG Save: Protobuf message has %d mappings\n", len(fs.Mappings))
+		}
+	}
+
+	// DEBUG: Print total measurements and mappings
+	fmt.Fprintf(os.Stderr, "DEBUG Save: Marshaling %d measurements\n", len(pb.Measurements))
+	for _, meas := range pb.Measurements {
+		fmt.Fprintf(os.Stderr, "  Measurement %s: %d fields, %d mappings\n", meas.Name, len(meas.Fields), len(meas.Mappings))
 	}
 
 	b, err := proto.Marshal(&pb)
 	if err != nil {
 		return err
 	}
+
+	// DEBUG: Print marshaled size
+	fmt.Fprintf(os.Stderr, "DEBUG Save: Marshaled %d bytes\n", len(b))
 
 	if _, err := fd.Write(b); err != nil {
 		return err
