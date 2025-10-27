@@ -253,7 +253,7 @@ func (b *exprIteratorBuilder) buildCallIterator(ctx context.Context, expr *influ
 		opt.Interval = Interval{}
 
 		return newHoltWintersIterator(input, opt, int(h.Val), int(m.Val), includeFitData, interval)
-	case "derivative", "non_negative_derivative", "difference", "non_negative_difference", "moving_average", "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative", "kaufmans_efficiency_ratio", "kaufmans_adaptive_moving_average", "chande_momentum_oscillator", "elapsed":
+	case "derivative", "non_negative_derivative", "difference", "non_negative_difference", "moving_average", "moving_median", "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative", "kaufmans_efficiency_ratio", "kaufmans_adaptive_moving_average", "chande_momentum_oscillator", "elapsed":
 		if !opt.Interval.IsZero() {
 			if opt.Ascending {
 				opt.StartTime -= int64(opt.Interval.Duration)
@@ -281,14 +281,96 @@ func (b *exprIteratorBuilder) buildCallIterator(ctx context.Context, expr *influ
 			return newDifferenceIterator(input, opt, isNonNegative)
 		case "moving_average":
 			n := expr.Args[1].(*influxql.IntegerLiteral)
-			if n.Val > 1 && !opt.Interval.IsZero() {
-				if opt.Ascending {
-					opt.StartTime -= int64(opt.Interval.Duration) * (n.Val - 1)
-				} else {
-					opt.EndTime += int64(opt.Interval.Duration) * (n.Val - 1)
+			minPeriods := int(n.Val)
+			center := false
+
+			// Parse optional 3rd parameter (minPeriods)
+			if len(expr.Args) >= 3 {
+				if minPeriodsExpr, ok := expr.Args[2].(*influxql.IntegerLiteral); ok {
+					minPeriods = int(minPeriodsExpr.Val)
 				}
 			}
-			return newMovingAverageIterator(input, int(n.Val), opt)
+
+			// Parse optional 4th parameter (center)
+			if len(expr.Args) >= 4 {
+				if centerExpr, ok := expr.Args[3].(*influxql.BooleanLiteral); ok {
+					center = centerExpr.Val
+				}
+			}
+
+			// Calculate time range padding
+			if n.Val > 1 && !opt.Interval.IsZero() {
+				// Window span: windowSize-1 intervals
+				windowSpan := int64(n.Val-1) * int64(opt.Interval.Duration)
+				padding := windowSpan
+
+				if center {
+					// For centered windows, we need future data to calculate the window
+					// Then we'll time-shift the results backward and filter
+					// Expand both start and end to get future data
+					if opt.Ascending {
+						opt.StartTime -= padding
+						opt.EndTime += padding
+					} else {
+						opt.EndTime += padding
+						opt.StartTime -= padding
+					}
+				} else {
+					// Trailing window: only need data before
+					if opt.Ascending {
+						opt.StartTime -= padding
+					} else {
+						opt.EndTime += padding
+					}
+				}
+			}
+			return newMovingAverageIterator(input, int(n.Val), minPeriods, center, opt)
+		case "moving_median":
+			n := expr.Args[1].(*influxql.IntegerLiteral)
+			minPeriods := int(n.Val)
+			center := false
+
+			// Parse optional 3rd parameter (minPeriods)
+			if len(expr.Args) >= 3 {
+				if minPeriodsExpr, ok := expr.Args[2].(*influxql.IntegerLiteral); ok {
+					minPeriods = int(minPeriodsExpr.Val)
+				}
+			}
+
+			// Parse optional 4th parameter (center)
+			if len(expr.Args) >= 4 {
+				if centerExpr, ok := expr.Args[3].(*influxql.BooleanLiteral); ok {
+					center = centerExpr.Val
+				}
+			}
+
+			// Calculate time range padding
+			if n.Val > 1 && !opt.Interval.IsZero() {
+				// Window span: windowSize-1 intervals
+				windowSpan := int64(n.Val-1) * int64(opt.Interval.Duration)
+				padding := windowSpan
+
+				if center {
+					// For centered windows, we need future data to calculate the window
+					// Then we'll time-shift the results backward and filter
+					// Expand both start and end to get future data
+					if opt.Ascending {
+						opt.StartTime -= padding
+						opt.EndTime += padding
+					} else {
+						opt.EndTime += padding
+						opt.StartTime -= padding
+					}
+				} else {
+					// Trailing window: only need data before
+					if opt.Ascending {
+						opt.StartTime -= padding
+					} else {
+						opt.EndTime += padding
+					}
+				}
+			}
+			return newMovingMedianIterator(input, int(n.Val), minPeriods, center, opt)
 		case "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative":
 			n := expr.Args[1].(*influxql.IntegerLiteral)
 			if n.Val > 1 && !opt.Interval.IsZero() {

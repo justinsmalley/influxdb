@@ -75,7 +75,7 @@ func (m FunctionTypeMapper) CallType(name string, args []influxql.DataType) (inf
 	switch name {
 	case "median", "integral", "stddev",
 		"derivative", "non_negative_derivative",
-		"moving_average",
+		"moving_average", "moving_median",
 		"exponential_moving_average",
 		"double_exponential_moving_average",
 		"triple_exponential_moving_average",
@@ -597,141 +597,672 @@ func (r *UnsignedDifferenceReducer) Emit() []UnsignedPoint {
 
 // FloatMovingAverageReducer calculates the moving average of the aggregated points.
 type FloatMovingAverageReducer struct {
-	pos  int
-	sum  float64
-	time int64
-	buf  []float64
+	pos        int
+	windowSize int
+	minPeriods int
+	center     bool
+	interval   time.Duration
+	sum        float64
+	time       int64
+	valueBuf   []float64
+	timeBuf    []int64
 }
 
 // NewFloatMovingAverageReducer creates a new FloatMovingAverageReducer.
-func NewFloatMovingAverageReducer(n int) *FloatMovingAverageReducer {
+func NewFloatMovingAverageReducer(windowSize, minPeriods int, center bool, interval time.Duration) *FloatMovingAverageReducer {
 	return &FloatMovingAverageReducer{
-		buf: make([]float64, 0, n),
+		windowSize: windowSize,
+		minPeriods: minPeriods,
+		center:     center,
+		interval:   interval,
+		valueBuf:   make([]float64, 0, windowSize),
+		timeBuf:    make([]int64, 0, windowSize),
 	}
 }
 
 // AggregateFloat aggregates a point into the reducer and updates the current window.
 func (r *FloatMovingAverageReducer) AggregateFloat(p *FloatPoint) {
-	if len(r.buf) != cap(r.buf) {
-		r.buf = append(r.buf, p.Value)
+	if len(r.valueBuf) != cap(r.valueBuf) {
+		r.valueBuf = append(r.valueBuf, p.Value)
+		r.timeBuf = append(r.timeBuf, p.Time)
 	} else {
-		r.sum -= r.buf[r.pos]
-		r.buf[r.pos] = p.Value
+		r.valueBuf[r.pos] = p.Value
+		r.timeBuf[r.pos] = p.Time
 	}
-	r.sum += p.Value
 	r.time = p.Time
 	r.pos++
-	if r.pos >= cap(r.buf) {
+	if r.pos >= cap(r.valueBuf) {
 		r.pos = 0
 	}
 }
 
+// validPoints filters the buffer to only include points within the valid time window
+func (r *FloatMovingAverageReducer) validPoints() ([]float64, int64) {
+	if r.time == 0 {
+		return []float64{}, 0
+	}
+
+	var validStart, validEnd int64
+	intervalNS := r.interval.Nanoseconds()
+
+	if r.center {
+		// For centered windows with GROUP BY, we can't access future data
+		// Instead, treat it like trailing but shift the output backward
+		windowSpanNS := int64(r.windowSize-1) * intervalNS
+		validStart = r.time - windowSpanNS
+		validEnd = r.time
+	} else {
+		// Trailing window: include points before and including current
+		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
+		validEnd = r.time
+	}
+
+	var validValues []float64
+	sum := 0.0
+	validCount := 0
+
+	for i := 0; i < len(r.valueBuf); i++ {
+		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
+			validValues = append(validValues, r.valueBuf[i])
+			sum += r.valueBuf[i]
+			validCount++
+		}
+	}
+
+	if validCount >= r.minPeriods {
+		return []float64{sum / float64(validCount)}, int64(validCount)
+	}
+	return []float64{}, int64(validCount)
+}
+
 // Emit emits the moving average of the current window. Emit should be called
 // after every call to AggregateFloat and it will produce one point if there
-// is enough data to fill a window, otherwise it will produce zero points.
+// is enough data to meet minPeriods, otherwise it will produce zero points.
 func (r *FloatMovingAverageReducer) Emit() []FloatPoint {
-	if len(r.buf) != cap(r.buf) {
+	if len(r.valueBuf) == 0 {
 		return []FloatPoint{}
 	}
+
+	avgValues, validCount := r.validPoints()
+	if len(avgValues) == 0 {
+		return []FloatPoint{}
+	}
+
+	// For centered windows, shift the result timestamp backward by windowSize/2
+	emitTime := r.time
+	if r.center {
+		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
+		emitTime = r.time - halfSpanNS
+	}
+
 	return []FloatPoint{
 		{
-			Value:      r.sum / float64(len(r.buf)),
-			Time:       r.time,
-			Aggregated: uint32(len(r.buf)),
+			Value:      avgValues[0],
+			Time:       emitTime,
+			Aggregated: uint32(validCount),
 		},
 	}
 }
 
 // IntegerMovingAverageReducer calculates the moving average of the aggregated points.
 type IntegerMovingAverageReducer struct {
-	pos  int
-	sum  int64
-	time int64
-	buf  []int64
+	pos        int
+	windowSize int
+	minPeriods int
+	center     bool
+	interval   time.Duration
+	sum        int64
+	time       int64
+	valueBuf   []int64
+	timeBuf    []int64
 }
 
 // NewIntegerMovingAverageReducer creates a new IntegerMovingAverageReducer.
-func NewIntegerMovingAverageReducer(n int) *IntegerMovingAverageReducer {
+func NewIntegerMovingAverageReducer(windowSize, minPeriods int, center bool, interval time.Duration) *IntegerMovingAverageReducer {
 	return &IntegerMovingAverageReducer{
-		buf: make([]int64, 0, n),
+		windowSize: windowSize,
+		minPeriods: minPeriods,
+		center:     center,
+		interval:   interval,
+		valueBuf:   make([]int64, 0, windowSize),
+		timeBuf:    make([]int64, 0, windowSize),
 	}
 }
 
 // AggregateInteger aggregates a point into the reducer and updates the current window.
 func (r *IntegerMovingAverageReducer) AggregateInteger(p *IntegerPoint) {
-	if len(r.buf) != cap(r.buf) {
-		r.buf = append(r.buf, p.Value)
+	if len(r.valueBuf) != cap(r.valueBuf) {
+		r.valueBuf = append(r.valueBuf, p.Value)
+		r.timeBuf = append(r.timeBuf, p.Time)
 	} else {
-		r.sum -= r.buf[r.pos]
-		r.buf[r.pos] = p.Value
+		r.valueBuf[r.pos] = p.Value
+		r.timeBuf[r.pos] = p.Time
 	}
-	r.sum += p.Value
 	r.time = p.Time
 	r.pos++
-	if r.pos >= cap(r.buf) {
+	if r.pos >= cap(r.valueBuf) {
 		r.pos = 0
 	}
 }
 
+// validPoints filters the buffer to only include points within the valid time window
+func (r *IntegerMovingAverageReducer) validPoints() ([]float64, int64) {
+	if r.time == 0 {
+		return []float64{}, 0
+	}
+
+	var validStart, validEnd int64
+	intervalNS := r.interval.Nanoseconds()
+
+	if r.center {
+		// For centered windows with GROUP BY, we can't access future data
+		// Instead, treat it like trailing but shift the output backward
+		windowSpanNS := int64(r.windowSize-1) * intervalNS
+		validStart = r.time - windowSpanNS
+		validEnd = r.time
+	} else {
+		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
+		validEnd = r.time
+	}
+
+	sum := int64(0)
+	validCount := 0
+
+	for i := 0; i < len(r.valueBuf); i++ {
+		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
+			sum += r.valueBuf[i]
+			validCount++
+		}
+	}
+
+	if validCount >= r.minPeriods {
+		return []float64{float64(sum) / float64(validCount)}, int64(validCount)
+	}
+	return []float64{}, int64(validCount)
+}
+
 // Emit emits the moving average of the current window. Emit should be called
 // after every call to AggregateInteger and it will produce one point if there
-// is enough data to fill a window, otherwise it will produce zero points.
+// is enough data to meet minPeriods, otherwise it will produce zero points.
 func (r *IntegerMovingAverageReducer) Emit() []FloatPoint {
-	if len(r.buf) != cap(r.buf) {
+	if len(r.valueBuf) == 0 {
 		return []FloatPoint{}
 	}
+
+	avgValues, validCount := r.validPoints()
+	if len(avgValues) == 0 {
+		return []FloatPoint{}
+	}
+
+	// For centered windows, shift the result timestamp backward by windowSize/2
+	emitTime := r.time
+	if r.center {
+		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
+		emitTime = r.time - halfSpanNS
+	}
+
 	return []FloatPoint{
 		{
-			Value:      float64(r.sum) / float64(len(r.buf)),
-			Time:       r.time,
-			Aggregated: uint32(len(r.buf)),
+			Value:      avgValues[0],
+			Time:       emitTime,
+			Aggregated: uint32(validCount),
 		},
 	}
 }
 
 // UnsignedMovingAverageReducer calculates the moving average of the aggregated points.
 type UnsignedMovingAverageReducer struct {
-	pos  int
-	sum  uint64
-	time int64
-	buf  []uint64
+	pos        int
+	windowSize int
+	minPeriods int
+	center     bool
+	interval   time.Duration
+	sum        uint64
+	time       int64
+	valueBuf   []uint64
+	timeBuf    []int64
 }
 
 // NewUnsignedMovingAverageReducer creates a new UnsignedMovingAverageReducer.
-func NewUnsignedMovingAverageReducer(n int) *UnsignedMovingAverageReducer {
+func NewUnsignedMovingAverageReducer(windowSize, minPeriods int, center bool, interval time.Duration) *UnsignedMovingAverageReducer {
 	return &UnsignedMovingAverageReducer{
-		buf: make([]uint64, 0, n),
+		windowSize: windowSize,
+		minPeriods: minPeriods,
+		center:     center,
+		interval:   interval,
+		valueBuf:   make([]uint64, 0, windowSize),
+		timeBuf:    make([]int64, 0, windowSize),
 	}
 }
 
 // AggregateUnsigned aggregates a point into the reducer and updates the current window.
 func (r *UnsignedMovingAverageReducer) AggregateUnsigned(p *UnsignedPoint) {
-	if len(r.buf) != cap(r.buf) {
-		r.buf = append(r.buf, p.Value)
+	if len(r.valueBuf) != cap(r.valueBuf) {
+		r.valueBuf = append(r.valueBuf, p.Value)
+		r.timeBuf = append(r.timeBuf, p.Time)
 	} else {
-		r.sum -= r.buf[r.pos]
-		r.buf[r.pos] = p.Value
+		r.valueBuf[r.pos] = p.Value
+		r.timeBuf[r.pos] = p.Time
 	}
-	r.sum += p.Value
 	r.time = p.Time
 	r.pos++
-	if r.pos >= cap(r.buf) {
+	if r.pos >= cap(r.valueBuf) {
 		r.pos = 0
 	}
 }
 
+// validPoints filters the buffer to only include points within the valid time window
+func (r *UnsignedMovingAverageReducer) validPoints() ([]float64, int64) {
+	if r.time == 0 {
+		return []float64{}, 0
+	}
+
+	var validStart, validEnd int64
+	intervalNS := r.interval.Nanoseconds()
+
+	if r.center {
+		// For centered windows with GROUP BY, we can't access future data
+		// Instead, treat it like trailing but shift the output backward
+		windowSpanNS := int64(r.windowSize-1) * intervalNS
+		validStart = r.time - windowSpanNS
+		validEnd = r.time
+	} else {
+		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
+		validEnd = r.time
+	}
+
+	sum := uint64(0)
+	validCount := 0
+
+	for i := 0; i < len(r.valueBuf); i++ {
+		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
+			sum += r.valueBuf[i]
+			validCount++
+		}
+	}
+
+	if validCount >= r.minPeriods {
+		return []float64{float64(sum) / float64(validCount)}, int64(validCount)
+	}
+	return []float64{}, int64(validCount)
+}
+
 // Emit emits the moving average of the current window. Emit should be called
 // after every call to AggregateUnsigned and it will produce one point if there
-// is enough data to fill a window, otherwise it will produce zero points.
+// is enough data to meet minPeriods, otherwise it will produce zero points.
 func (r *UnsignedMovingAverageReducer) Emit() []FloatPoint {
-	if len(r.buf) != cap(r.buf) {
+	if len(r.valueBuf) == 0 {
 		return []FloatPoint{}
 	}
+
+	avgValues, validCount := r.validPoints()
+	if len(avgValues) == 0 {
+		return []FloatPoint{}
+	}
+
+	// For centered windows, shift the result timestamp backward by windowSize/2
+	emitTime := r.time
+	if r.center {
+		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
+		emitTime = r.time - halfSpanNS
+	}
+
 	return []FloatPoint{
 		{
-			Value:      float64(r.sum) / float64(len(r.buf)),
-			Time:       r.time,
-			Aggregated: uint32(len(r.buf)),
+			Value:      avgValues[0],
+			Time:       emitTime,
+			Aggregated: uint32(validCount),
+		},
+	}
+}
+
+// FloatMovingMedianReducer calculates the moving median of the aggregated points.
+type FloatMovingMedianReducer struct {
+	pos        int
+	windowSize int
+	minPeriods int
+	center     bool
+	interval   time.Duration
+	time       int64
+	valueBuf   []float64
+	timeBuf    []int64
+}
+
+// NewFloatMovingMedianReducer creates a new FloatMovingMedianReducer.
+func NewFloatMovingMedianReducer(windowSize, minPeriods int, center bool, interval time.Duration) *FloatMovingMedianReducer {
+	return &FloatMovingMedianReducer{
+		windowSize: windowSize,
+		minPeriods: minPeriods,
+		center:     center,
+		interval:   interval,
+		valueBuf:   make([]float64, 0, windowSize),
+		timeBuf:    make([]int64, 0, windowSize),
+	}
+}
+
+// AggregateFloat aggregates a point into the reducer and updates the current window.
+func (r *FloatMovingMedianReducer) AggregateFloat(p *FloatPoint) {
+	if len(r.valueBuf) != cap(r.valueBuf) {
+		r.valueBuf = append(r.valueBuf, p.Value)
+		r.timeBuf = append(r.timeBuf, p.Time)
+	} else {
+		r.valueBuf[r.pos] = p.Value
+		r.timeBuf[r.pos] = p.Time
+	}
+	r.time = p.Time
+	r.pos++
+	if r.pos >= cap(r.valueBuf) {
+		r.pos = 0
+	}
+}
+
+// validPoints filters the buffer to only include points within the valid time window and returns median
+func (r *FloatMovingMedianReducer) validPoints() ([]float64, int64) {
+	if r.time == 0 {
+		return []float64{}, 0
+	}
+
+	var validStart, validEnd int64
+	intervalNS := r.interval.Nanoseconds()
+
+	if r.center {
+		// For centered windows with GROUP BY, we can't access future data
+		// Instead, treat it like trailing but shift the output backward
+		// The window span calculation should only look at past data
+		windowSpanNS := int64(r.windowSize-1) * intervalNS
+		validStart = r.time - windowSpanNS
+		validEnd = r.time
+	} else {
+		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
+		validEnd = r.time
+	}
+
+	var validValues []float64
+
+	// Iterate through the buffer (they're stored in chronological order)
+	for i := 0; i < len(r.valueBuf); i++ {
+		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
+			validValues = append(validValues, r.valueBuf[i])
+		}
+	}
+
+	if len(validValues) < r.minPeriods {
+		return []float64{}, int64(len(validValues))
+	}
+
+	if len(validValues) == 1 {
+		return []float64{validValues[0]}, int64(len(validValues))
+	}
+
+	// Sort values
+	sort.Slice(validValues, func(i, j int) bool {
+		return validValues[i] < validValues[j]
+	})
+
+	if len(validValues)%2 == 0 {
+		lo, hi := validValues[len(validValues)/2-1], validValues[len(validValues)/2]
+		return []float64{lo + (hi-lo)/2}, int64(len(validValues))
+	}
+	return []float64{validValues[len(validValues)/2]}, int64(len(validValues))
+}
+
+// Emit emits the moving median of the current window. Emit should be called
+// after every call to AggregateFloat and it will produce one point if there
+// is enough data to meet minPeriods, otherwise it will produce zero points.
+func (r *FloatMovingMedianReducer) Emit() []FloatPoint {
+	if len(r.valueBuf) == 0 {
+		return []FloatPoint{}
+	}
+
+	medianValues, validCount := r.validPoints()
+	if len(medianValues) == 0 {
+		return []FloatPoint{}
+	}
+
+	// For centered windows, shift the result timestamp backward by windowSize/2
+	emitTime := r.time
+	if r.center {
+		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
+		emitTime = r.time - halfSpanNS
+	}
+
+	return []FloatPoint{
+		{
+			Value:      medianValues[0],
+			Time:       emitTime,
+			Aggregated: uint32(validCount),
+		},
+	}
+}
+
+// IntegerMovingMedianReducer calculates the moving median of the aggregated points.
+type IntegerMovingMedianReducer struct {
+	pos        int
+	windowSize int
+	minPeriods int
+	center     bool
+	interval   time.Duration
+	time       int64
+	valueBuf   []int64
+	timeBuf    []int64
+}
+
+// NewIntegerMovingMedianReducer creates a new IntegerMovingMedianReducer.
+func NewIntegerMovingMedianReducer(windowSize, minPeriods int, center bool, interval time.Duration) *IntegerMovingMedianReducer {
+	return &IntegerMovingMedianReducer{
+		windowSize: windowSize,
+		minPeriods: minPeriods,
+		center:     center,
+		interval:   interval,
+		valueBuf:   make([]int64, 0, windowSize),
+		timeBuf:    make([]int64, 0, windowSize),
+	}
+}
+
+// AggregateInteger aggregates a point into the reducer and updates the current window.
+func (r *IntegerMovingMedianReducer) AggregateInteger(p *IntegerPoint) {
+	if len(r.valueBuf) != cap(r.valueBuf) {
+		r.valueBuf = append(r.valueBuf, p.Value)
+		r.timeBuf = append(r.timeBuf, p.Time)
+	} else {
+		r.valueBuf[r.pos] = p.Value
+		r.timeBuf[r.pos] = p.Time
+	}
+	r.time = p.Time
+	r.pos++
+	if r.pos >= cap(r.valueBuf) {
+		r.pos = 0
+	}
+}
+
+// validPoints filters the buffer to only include points within the valid time window and returns median
+func (r *IntegerMovingMedianReducer) validPoints() ([]float64, int64) {
+	if r.time == 0 {
+		return []float64{}, 0
+	}
+
+	var validStart, validEnd int64
+	intervalNS := r.interval.Nanoseconds()
+
+	if r.center {
+		// For centered windows with GROUP BY, we can't access future data
+		// Instead, treat it like trailing but shift the output backward
+		windowSpanNS := int64(r.windowSize-1) * intervalNS
+		validStart = r.time - windowSpanNS
+		validEnd = r.time
+	} else {
+		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
+		validEnd = r.time
+	}
+
+	var validValues []int64
+	for i := 0; i < len(r.valueBuf); i++ {
+		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
+			validValues = append(validValues, r.valueBuf[i])
+		}
+	}
+
+	if len(validValues) < r.minPeriods {
+		return []float64{}, int64(len(validValues))
+	}
+
+	if len(validValues) == 1 {
+		return []float64{float64(validValues[0])}, int64(len(validValues))
+	}
+
+	// Sort values
+	sort.Slice(validValues, func(i, j int) bool {
+		return validValues[i] < validValues[j]
+	})
+
+	if len(validValues)%2 == 0 {
+		lo, hi := float64(validValues[len(validValues)/2-1]), float64(validValues[len(validValues)/2])
+		return []float64{lo + (hi-lo)/2}, int64(len(validValues))
+	}
+	return []float64{float64(validValues[len(validValues)/2])}, int64(len(validValues))
+}
+
+// Emit emits the moving median of the current window. Emit should be called
+// after every call to AggregateInteger and it will produce one point if there
+// is enough data to meet minPeriods, otherwise it will produce zero points.
+func (r *IntegerMovingMedianReducer) Emit() []FloatPoint {
+	if len(r.valueBuf) == 0 {
+		return []FloatPoint{}
+	}
+
+	medianValues, validCount := r.validPoints()
+	if len(medianValues) == 0 {
+		return []FloatPoint{}
+	}
+
+	// For centered windows, shift the result timestamp backward by windowSize/2
+	emitTime := r.time
+	if r.center {
+		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
+		emitTime = r.time - halfSpanNS
+	}
+
+	return []FloatPoint{
+		{
+			Value:      medianValues[0],
+			Time:       emitTime,
+			Aggregated: uint32(validCount),
+		},
+	}
+}
+
+// UnsignedMovingMedianReducer calculates the moving median of the aggregated points.
+type UnsignedMovingMedianReducer struct {
+	pos        int
+	windowSize int
+	minPeriods int
+	center     bool
+	interval   time.Duration
+	time       int64
+	valueBuf   []uint64
+	timeBuf    []int64
+}
+
+// NewUnsignedMovingMedianReducer creates a new UnsignedMovingMedianReducer.
+func NewUnsignedMovingMedianReducer(windowSize, minPeriods int, center bool, interval time.Duration) *UnsignedMovingMedianReducer {
+	return &UnsignedMovingMedianReducer{
+		windowSize: windowSize,
+		minPeriods: minPeriods,
+		center:     center,
+		interval:   interval,
+		valueBuf:   make([]uint64, 0, windowSize),
+		timeBuf:    make([]int64, 0, windowSize),
+	}
+}
+
+// AggregateUnsigned aggregates a point into the reducer and updates the current window.
+func (r *UnsignedMovingMedianReducer) AggregateUnsigned(p *UnsignedPoint) {
+	if len(r.valueBuf) != cap(r.valueBuf) {
+		r.valueBuf = append(r.valueBuf, p.Value)
+		r.timeBuf = append(r.timeBuf, p.Time)
+	} else {
+		r.valueBuf[r.pos] = p.Value
+		r.timeBuf[r.pos] = p.Time
+	}
+	r.time = p.Time
+	r.pos++
+	if r.pos >= cap(r.valueBuf) {
+		r.pos = 0
+	}
+}
+
+// validPoints filters the buffer to only include points within the valid time window and returns median
+func (r *UnsignedMovingMedianReducer) validPoints() ([]float64, int64) {
+	if r.time == 0 {
+		return []float64{}, 0
+	}
+
+	var validStart, validEnd int64
+	intervalNS := r.interval.Nanoseconds()
+
+	if r.center {
+		// For centered windows with GROUP BY, we can't access future data
+		// Instead, treat it like trailing but shift the output backward
+		windowSpanNS := int64(r.windowSize-1) * intervalNS
+		validStart = r.time - windowSpanNS
+		validEnd = r.time
+	} else {
+		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
+		validEnd = r.time
+	}
+
+	var validValues []uint64
+	for i := 0; i < len(r.valueBuf); i++ {
+		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
+			validValues = append(validValues, r.valueBuf[i])
+		}
+	}
+
+	if len(validValues) < r.minPeriods {
+		return []float64{}, int64(len(validValues))
+	}
+
+	if len(validValues) == 1 {
+		return []float64{float64(validValues[0])}, int64(len(validValues))
+	}
+
+	// Sort values
+	sort.Slice(validValues, func(i, j int) bool {
+		return validValues[i] < validValues[j]
+	})
+
+	if len(validValues)%2 == 0 {
+		lo, hi := float64(validValues[len(validValues)/2-1]), float64(validValues[len(validValues)/2])
+		return []float64{lo + (hi-lo)/2}, int64(len(validValues))
+	}
+	return []float64{float64(validValues[len(validValues)/2])}, int64(len(validValues))
+}
+
+// Emit emits the moving median of the current window. Emit should be called
+// after every call to AggregateUnsigned and it will produce one point if there
+// is enough data to meet minPeriods, otherwise it will produce zero points.
+func (r *UnsignedMovingMedianReducer) Emit() []FloatPoint {
+	if len(r.valueBuf) == 0 {
+		return []FloatPoint{}
+	}
+
+	medianValues, validCount := r.validPoints()
+	if len(medianValues) == 0 {
+		return []FloatPoint{}
+	}
+
+	// For centered windows, shift the result timestamp backward by windowSize/2
+	emitTime := r.time
+	if r.center {
+		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
+		emitTime = r.time - halfSpanNS
+	}
+
+	return []FloatPoint{
+		{
+			Value:      medianValues[0],
+			Time:       emitTime,
+			Aggregated: uint32(validCount),
 		},
 	}
 }
@@ -1202,8 +1733,8 @@ func (r *UnsignedCumulativeSumReducer) Emit() []UnsignedPoint {
 
 // FloatHoltWintersReducer forecasts a series into the future.
 // This is done using the Holt-Winters damped method.
-//    1. Using the series the initial values are calculated using a SSE.
-//    2. The series is forecasted into the future using the iterative relations.
+//  1. Using the series the initial values are calculated using a SSE.
+//  2. The series is forecasted into the future using the iterative relations.
 type FloatHoltWintersReducer struct {
 	// Season period
 	m        int

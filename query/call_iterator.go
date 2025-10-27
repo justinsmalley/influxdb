@@ -1182,28 +1182,54 @@ func newElapsedIterator(input Iterator, opt IteratorOptions, interval Interval) 
 }
 
 // newMovingAverageIterator returns an iterator for operating on a moving_average() call.
-func newMovingAverageIterator(input Iterator, n int, opt IteratorOptions) (Iterator, error) {
+func newMovingAverageIterator(input Iterator, n, minPeriods int, center bool, opt IteratorOptions) (Iterator, error) {
 	switch input := input.(type) {
 	case FloatIterator:
 		createFn := func() (FloatPointAggregator, FloatPointEmitter) {
-			fn := NewFloatMovingAverageReducer(n)
+			fn := NewFloatMovingAverageReducer(n, minPeriods, center, opt.Interval.Duration)
 			return fn, fn
 		}
 		return newFloatStreamFloatIterator(input, createFn, opt), nil
 	case IntegerIterator:
 		createFn := func() (IntegerPointAggregator, FloatPointEmitter) {
-			fn := NewIntegerMovingAverageReducer(n)
+			fn := NewIntegerMovingAverageReducer(n, minPeriods, center, opt.Interval.Duration)
 			return fn, fn
 		}
 		return newIntegerStreamFloatIterator(input, createFn, opt), nil
 	case UnsignedIterator:
 		createFn := func() (UnsignedPointAggregator, FloatPointEmitter) {
-			fn := NewUnsignedMovingAverageReducer(n)
+			fn := NewUnsignedMovingAverageReducer(n, minPeriods, center, opt.Interval.Duration)
 			return fn, fn
 		}
 		return newUnsignedStreamFloatIterator(input, createFn, opt), nil
 	default:
 		return nil, fmt.Errorf("unsupported moving average iterator type: %T", input)
+	}
+}
+
+// newMovingMedianIterator returns an iterator for operating on a moving_median() call.
+func newMovingMedianIterator(input Iterator, n, minPeriods int, center bool, opt IteratorOptions) (Iterator, error) {
+	switch input := input.(type) {
+	case FloatIterator:
+		createFn := func() (FloatPointAggregator, FloatPointEmitter) {
+			fn := NewFloatMovingMedianReducer(n, minPeriods, center, opt.Interval.Duration)
+			return fn, fn
+		}
+		return newFloatStreamFloatIterator(input, createFn, opt), nil
+	case IntegerIterator:
+		createFn := func() (IntegerPointAggregator, FloatPointEmitter) {
+			fn := NewIntegerMovingMedianReducer(n, minPeriods, center, opt.Interval.Duration)
+			return fn, fn
+		}
+		return newIntegerStreamFloatIterator(input, createFn, opt), nil
+	case UnsignedIterator:
+		createFn := func() (UnsignedPointAggregator, FloatPointEmitter) {
+			fn := NewUnsignedMovingMedianReducer(n, minPeriods, center, opt.Interval.Duration)
+			return fn, fn
+		}
+		return newUnsignedStreamFloatIterator(input, createFn, opt), nil
+	default:
+		return nil, fmt.Errorf("unsupported moving median iterator type: %T", input)
 	}
 }
 

@@ -285,6 +285,8 @@ func (c *compiledField) compileExpr(expr influxql.Expr) error {
 			return c.compileCumulativeSum(expr.Args)
 		case "moving_average":
 			return c.compileMovingAverage(expr.Args)
+		case "moving_median":
+			return c.compileMovingMedian(expr.Args)
 		case "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative":
 			return c.compileExponentialMovingAverage(expr.Name, expr.Args)
 		case "kaufmans_efficiency_ratio", "kaufmans_adaptive_moving_average":
@@ -565,8 +567,8 @@ func (c *compiledField) compileCumulativeSum(args []influxql.Expr) error {
 }
 
 func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
-	if got := len(args); got != 2 {
-		return fmt.Errorf("invalid number of arguments for moving_average, expected 2, got %d", got)
+	if got := len(args); got < 2 || got > 4 {
+		return fmt.Errorf("invalid number of arguments for moving_average, expected 2-4, got %d", got)
 	}
 
 	arg1, ok := args[1].(*influxql.IntegerLiteral)
@@ -576,8 +578,18 @@ func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
 		return fmt.Errorf("moving_average window must be greater than 1, got %d", arg1.Val)
 	}
 	c.global.OnlySelectors = false
-	if c.global.ExtraIntervals < int(arg1.Val) {
-		c.global.ExtraIntervals = int(arg1.Val)
+
+	// Calculate ExtraIntervals based on center flag
+	extraIntervals := int(arg1.Val)
+	if len(args) >= 4 {
+		// Fourth argument is center flag
+		if centerExpr, ok := args[3].(*influxql.BooleanLiteral); ok && centerExpr.Val {
+			// Centered window: use half the window size for padding
+			extraIntervals = int(arg1.Val) / 2
+		}
+	}
+	if c.global.ExtraIntervals < extraIntervals {
+		c.global.ExtraIntervals = extraIntervals
 	}
 
 	// Must be a variable reference, function, wildcard, or regexp.
@@ -592,6 +604,47 @@ func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
 			return fmt.Errorf("aggregate function required inside the call to moving_average")
 		}
 		return c.compileSymbol("moving_average", arg0)
+	}
+}
+
+func (c *compiledField) compileMovingMedian(args []influxql.Expr) error {
+	if got := len(args); got < 2 || got > 4 {
+		return fmt.Errorf("invalid number of arguments for moving_median, expected 2-4, got %d", got)
+	}
+
+	arg1, ok := args[1].(*influxql.IntegerLiteral)
+	if !ok {
+		return fmt.Errorf("second argument for moving_median must be an integer, got %T", args[1])
+	} else if arg1.Val <= 1 {
+		return fmt.Errorf("moving_median window must be greater than 1, got %d", arg1.Val)
+	}
+	c.global.OnlySelectors = false
+
+	// Calculate ExtraIntervals based on center flag
+	extraIntervals := int(arg1.Val)
+	if len(args) >= 4 {
+		// Fourth argument is center flag
+		if centerExpr, ok := args[3].(*influxql.BooleanLiteral); ok && centerExpr.Val {
+			// Centered window: use half the window size for padding
+			extraIntervals = int(arg1.Val) / 2
+		}
+	}
+	if c.global.ExtraIntervals < extraIntervals {
+		c.global.ExtraIntervals = extraIntervals
+	}
+
+	// Must be a variable reference, function, wildcard, or regexp.
+	switch arg0 := args[0].(type) {
+	case *influxql.Call:
+		if c.global.Interval.IsZero() {
+			return fmt.Errorf("moving_median aggregate requires a GROUP BY interval")
+		}
+		return c.compileNestedExpr(arg0)
+	default:
+		if !c.global.Interval.IsZero() && !c.global.InheritedInterval {
+			return fmt.Errorf("aggregate function required inside the call to moving_median")
+		}
+		return c.compileSymbol("moving_median", arg0)
 	}
 }
 
