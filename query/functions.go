@@ -75,7 +75,7 @@ func (m FunctionTypeMapper) CallType(name string, args []influxql.DataType) (inf
 	switch name {
 	case "median", "integral", "stddev",
 		"derivative", "non_negative_derivative",
-		"moving_average", "moving_median",
+		"moving_average",
 		"exponential_moving_average",
 		"double_exponential_moving_average",
 		"triple_exponential_moving_average",
@@ -597,30 +597,21 @@ func (r *UnsignedDifferenceReducer) Emit() []UnsignedPoint {
 
 // FloatMovingAverageReducer calculates the moving average of the aggregated points.
 type FloatMovingAverageReducer struct {
-	pos        int
-	sum        float64
-	time       int64
-	buf        []float64
-	minPeriods int
-	maxAge     int64 // maximum age in nanoseconds for points to consider
+	pos  int
+	sum  float64
+	time int64
+	buf  []float64
 }
 
 // NewFloatMovingAverageReducer creates a new FloatMovingAverageReducer.
 func NewFloatMovingAverageReducer(n int) *FloatMovingAverageReducer {
 	return &FloatMovingAverageReducer{
-		buf:        make([]float64, 0, n),
-		minPeriods: n, // default to window size
-		maxAge:     0, // 0 means no age limit
+		buf: make([]float64, 0, n),
 	}
 }
 
 // AggregateFloat aggregates a point into the reducer and updates the current window.
 func (r *FloatMovingAverageReducer) AggregateFloat(p *FloatPoint) {
-	// Skip points that are too old if maxAge is set
-	if r.maxAge > 0 && r.time > 0 && (r.time-p.Time) > r.maxAge {
-		return
-	}
-	
 	if len(r.buf) != cap(r.buf) {
 		r.buf = append(r.buf, p.Value)
 	} else {
@@ -637,9 +628,9 @@ func (r *FloatMovingAverageReducer) AggregateFloat(p *FloatPoint) {
 
 // Emit emits the moving average of the current window. Emit should be called
 // after every call to AggregateFloat and it will produce one point if there
-// is enough data to meet minPeriods, otherwise it will produce zero points.
+// is enough data to fill a window, otherwise it will produce zero points.
 func (r *FloatMovingAverageReducer) Emit() []FloatPoint {
-	if len(r.buf) < r.minPeriods {
+	if len(r.buf) != cap(r.buf) {
 		return []FloatPoint{}
 	}
 	return []FloatPoint{
@@ -653,30 +644,21 @@ func (r *FloatMovingAverageReducer) Emit() []FloatPoint {
 
 // IntegerMovingAverageReducer calculates the moving average of the aggregated points.
 type IntegerMovingAverageReducer struct {
-	pos        int
-	sum        int64
-	time       int64
-	buf        []int64
-	minPeriods int
-	maxAge     int64 // maximum age in nanoseconds for points to consider
+	pos  int
+	sum  int64
+	time int64
+	buf  []int64
 }
 
 // NewIntegerMovingAverageReducer creates a new IntegerMovingAverageReducer.
 func NewIntegerMovingAverageReducer(n int) *IntegerMovingAverageReducer {
 	return &IntegerMovingAverageReducer{
-		buf:        make([]int64, 0, n),
-		minPeriods: n, // default to window size
-		maxAge:     0, // 0 means no age limit
+		buf: make([]int64, 0, n),
 	}
 }
 
 // AggregateInteger aggregates a point into the reducer and updates the current window.
 func (r *IntegerMovingAverageReducer) AggregateInteger(p *IntegerPoint) {
-	// Skip points that are too old if maxAge is set
-	if r.maxAge > 0 && r.time > 0 && (r.time-p.Time) > r.maxAge {
-		return
-	}
-	
 	if len(r.buf) != cap(r.buf) {
 		r.buf = append(r.buf, p.Value)
 	} else {
@@ -693,9 +675,9 @@ func (r *IntegerMovingAverageReducer) AggregateInteger(p *IntegerPoint) {
 
 // Emit emits the moving average of the current window. Emit should be called
 // after every call to AggregateInteger and it will produce one point if there
-// is enough data to meet minPeriods, otherwise it will produce zero points.
+// is enough data to fill a window, otherwise it will produce zero points.
 func (r *IntegerMovingAverageReducer) Emit() []FloatPoint {
-	if len(r.buf) < r.minPeriods {
+	if len(r.buf) != cap(r.buf) {
 		return []FloatPoint{}
 	}
 	return []FloatPoint{
@@ -709,30 +691,21 @@ func (r *IntegerMovingAverageReducer) Emit() []FloatPoint {
 
 // UnsignedMovingAverageReducer calculates the moving average of the aggregated points.
 type UnsignedMovingAverageReducer struct {
-	pos        int
-	sum        uint64
-	time       int64
-	buf        []uint64
-	minPeriods int
-	maxAge     int64 // maximum age in nanoseconds for points to consider
+	pos  int
+	sum  uint64
+	time int64
+	buf  []uint64
 }
 
 // NewUnsignedMovingAverageReducer creates a new UnsignedMovingAverageReducer.
 func NewUnsignedMovingAverageReducer(n int) *UnsignedMovingAverageReducer {
 	return &UnsignedMovingAverageReducer{
-		buf:        make([]uint64, 0, n),
-		minPeriods: n, // default to window size
-		maxAge:     0, // 0 means no age limit
+		buf: make([]uint64, 0, n),
 	}
 }
 
 // AggregateUnsigned aggregates a point into the reducer and updates the current window.
 func (r *UnsignedMovingAverageReducer) AggregateUnsigned(p *UnsignedPoint) {
-	// Skip points that are too old if maxAge is set
-	if r.maxAge > 0 && r.time > 0 && (r.time-p.Time) > r.maxAge {
-		return
-	}
-	
 	if len(r.buf) != cap(r.buf) {
 		r.buf = append(r.buf, p.Value)
 	} else {
@@ -749,9 +722,9 @@ func (r *UnsignedMovingAverageReducer) AggregateUnsigned(p *UnsignedPoint) {
 
 // Emit emits the moving average of the current window. Emit should be called
 // after every call to AggregateUnsigned and it will produce one point if there
-// is enough data to meet minPeriods, otherwise it will produce zero points.
+// is enough data to fill a window, otherwise it will produce zero points.
 func (r *UnsignedMovingAverageReducer) Emit() []FloatPoint {
-	if len(r.buf) < r.minPeriods {
+	if len(r.buf) != cap(r.buf) {
 		return []FloatPoint{}
 	}
 	return []FloatPoint{
@@ -2172,212 +2145,4 @@ func (r *UnsignedBottomReducer) Emit() []UnsignedPoint {
 	h := unsignedPointsByFunc{points: points, cmp: r.h.cmp}
 	sort.Sort(sort.Reverse(&h))
 	return points
-}
-
-
-// FloatMovingMedianReducer calculates the moving median of the aggregated points.
-type FloatMovingMedianReducer struct {
-	pos        int
-	time       int64
-	buf        []float64
-	minPeriods int
-	maxAge     int64 // maximum age in nanoseconds for points to consider
-}
-
-// NewFloatMovingMedianReducer creates a new FloatMovingMedianReducer.
-func NewFloatMovingMedianReducer(n int) *FloatMovingMedianReducer {
-	return &FloatMovingMedianReducer{
-		buf:        make([]float64, 0, n),
-		minPeriods: n, // default to window size
-		maxAge:     0, // 0 means no age limit
-	}
-}
-
-// AggregateFloat aggregates a point into the reducer and updates the current window.
-func (r *FloatMovingMedianReducer) AggregateFloat(p *FloatPoint) {
-	// Skip points that are too old if maxAge is set
-	if r.maxAge > 0 && r.time > 0 && (r.time-p.Time) > r.maxAge {
-		return
-	}
-	
-	if len(r.buf) != cap(r.buf) {
-		r.buf = append(r.buf, p.Value)
-	} else {
-		r.buf[r.pos] = p.Value
-	}
-	r.time = p.Time
-	r.pos++
-	if r.pos >= cap(r.buf) {
-		r.pos = 0
-	}
-}
-
-// Emit emits the moving median of the current window. Emit should be called
-// after every call to AggregateFloat and it will produce one point if there
-// is enough data to meet minPeriods, otherwise it will produce zero points.
-func (r *FloatMovingMedianReducer) Emit() []FloatPoint {
-	if len(r.buf) < r.minPeriods {
-		return []FloatPoint{}
-	}
-	
-	// Copy buffer and sort to find median
-	values := make([]float64, len(r.buf))
-	copy(values, r.buf)
-	sort.Float64s(values)
-	
-	var median float64
-	if len(values)%2 == 0 {
-		// Even number of values - average of two middle values
-		lo, hi := values[len(values)/2-1], values[len(values)/2]
-		median = lo + (hi-lo)/2
-	} else {
-		// Odd number of values - middle value
-		median = values[len(values)/2]
-	}
-	
-	return []FloatPoint{
-		{
-			Value:      median,
-			Time:       r.time,
-			Aggregated: uint32(len(r.buf)),
-		},
-	}
-}
-
-// IntegerMovingMedianReducer calculates the moving median of the aggregated points.
-type IntegerMovingMedianReducer struct {
-	pos        int
-	time       int64
-	buf        []int64
-	minPeriods int
-	maxAge     int64 // maximum age in nanoseconds for points to consider
-}
-
-// NewIntegerMovingMedianReducer creates a new IntegerMovingMedianReducer.
-func NewIntegerMovingMedianReducer(n int) *IntegerMovingMedianReducer {
-	return &IntegerMovingMedianReducer{
-		buf:        make([]int64, 0, n),
-		minPeriods: n, // default to window size
-		maxAge:     0, // 0 means no age limit
-	}
-}
-
-// AggregateInteger aggregates a point into the reducer and updates the current window.
-func (r *IntegerMovingMedianReducer) AggregateInteger(p *IntegerPoint) {
-	// Skip points that are too old if maxAge is set
-	if r.maxAge > 0 && r.time > 0 && (r.time-p.Time) > r.maxAge {
-		return
-	}
-	
-	if len(r.buf) != cap(r.buf) {
-		r.buf = append(r.buf, p.Value)
-	} else {
-		r.buf[r.pos] = p.Value
-	}
-	r.time = p.Time
-	r.pos++
-	if r.pos >= cap(r.buf) {
-		r.pos = 0
-	}
-}
-
-// Emit emits the moving median of the current window. Emit should be called
-// after every call to AggregateInteger and it will produce one point if there
-// is enough data to meet minPeriods, otherwise it will produce zero points.
-func (r *IntegerMovingMedianReducer) Emit() []FloatPoint {
-	if len(r.buf) < r.minPeriods {
-		return []FloatPoint{}
-	}
-	
-	// Copy buffer and sort to find median
-	values := make([]int64, len(r.buf))
-	copy(values, r.buf)
-	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
-	
-	var median float64
-	if len(values)%2 == 0 {
-		// Even number of values - average of two middle values
-		lo, hi := values[len(values)/2-1], values[len(values)/2]
-		median = float64(lo) + float64(hi-lo)/2
-	} else {
-		// Odd number of values - middle value
-		median = float64(values[len(values)/2])
-	}
-	
-	return []FloatPoint{
-		{
-			Value:      median,
-			Time:       r.time,
-			Aggregated: uint32(len(r.buf)),
-		},
-	}
-}
-
-// UnsignedMovingMedianReducer calculates the moving median of the aggregated points.
-type UnsignedMovingMedianReducer struct {
-	pos        int
-	time       int64
-	buf        []uint64
-	minPeriods int
-	maxAge     int64 // maximum age in nanoseconds for points to consider
-}
-
-// NewUnsignedMovingMedianReducer creates a new UnsignedMovingMedianReducer.
-func NewUnsignedMovingMedianReducer(n int) *UnsignedMovingMedianReducer {
-	return &UnsignedMovingMedianReducer{
-		buf:        make([]uint64, 0, n),
-		minPeriods: n, // default to window size
-		maxAge:     0, // 0 means no age limit
-	}
-}
-
-// AggregateUnsigned aggregates a point into the reducer and updates the current window.
-func (r *UnsignedMovingMedianReducer) AggregateUnsigned(p *UnsignedPoint) {
-	// Skip points that are too old if maxAge is set
-	if r.maxAge > 0 && r.time > 0 && (r.time-p.Time) > r.maxAge {
-		return
-	}
-	
-	if len(r.buf) != cap(r.buf) {
-		r.buf = append(r.buf, p.Value)
-	} else {
-		r.buf[r.pos] = p.Value
-	}
-	r.time = p.Time
-	r.pos++
-	if r.pos >= cap(r.buf) {
-		r.pos = 0
-	}
-}
-
-// Emit emits the moving median of the current window. Emit should be called
-// after every call to AggregateUnsigned and it will produce one point if there
-// is enough data to meet minPeriods, otherwise it will produce zero points.
-func (r *UnsignedMovingMedianReducer) Emit() []FloatPoint {
-	if len(r.buf) < r.minPeriods {
-		return []FloatPoint{}
-	}
-	
-	// Copy buffer and sort to find median
-	values := make([]uint64, len(r.buf))
-	copy(values, r.buf)
-	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
-	
-	var median float64
-	if len(values)%2 == 0 {
-		// Even number of values - average of two middle values
-		lo, hi := values[len(values)/2-1], values[len(values)/2]
-		median = float64(lo) + float64(hi-lo)/2
-	} else {
-		// Odd number of values - middle value
-		median = float64(values[len(values)/2])
-	}
-	
-	return []FloatPoint{
-		{
-			Value:      median,
-			Time:       r.time,
-			Aggregated: uint32(len(r.buf)),
-		},
-	}
 }

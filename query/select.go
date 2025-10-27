@@ -253,61 +253,12 @@ func (b *exprIteratorBuilder) buildCallIterator(ctx context.Context, expr *influ
 		opt.Interval = Interval{}
 
 		return newHoltWintersIterator(input, opt, int(h.Val), int(m.Val), includeFitData, interval)
-	case "derivative", "non_negative_derivative", "difference", "non_negative_difference", "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative", "kaufmans_efficiency_ratio", "kaufmans_adaptive_moving_average", "chande_momentum_oscillator", "elapsed":
+	case "derivative", "non_negative_derivative", "difference", "non_negative_difference", "moving_average", "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative", "kaufmans_efficiency_ratio", "kaufmans_adaptive_moving_average", "chande_momentum_oscillator", "elapsed":
 		if !opt.Interval.IsZero() {
 			if opt.Ascending {
 				opt.StartTime -= int64(opt.Interval.Duration)
 			} else {
 				opt.EndTime += int64(opt.Interval.Duration)
-			}
-		}
-		opt.Ordered = true
-
-		input, err := buildExprIterator(ctx, expr.Args[0], b.ic, b.sources, opt, b.selector, false)
-		if err != nil {
-			return nil, err
-		}
-		interval := opt.DerivativeInterval()
-		isNonNegative := (expr.Name == "non_negative_derivative")
-		return newDerivativeIterator(input, opt, interval, isNonNegative)
-	case "moving_average", "moving_median":
-		// Handle time range padding for moving functions
-		if !opt.Interval.IsZero() {
-			// Parse window size from function arguments
-			var windowSize int
-			if len(expr.Args) >= 2 {
-				if lit, ok := expr.Args[1].(*influxql.NumberLiteral); ok {
-					windowSize = int(lit.Val)
-				}
-			}
-			
-			// Only apply padding if window size > 1
-			if windowSize > 1 {
-				// Store original time range
-				opt.OriginalStartTime = opt.StartTime
-				opt.OriginalEndTime = opt.EndTime
-				
-				// Parse center flag if present
-				center := false
-				if len(expr.Args) >= 4 {
-					if lit, ok := expr.Args[3].(*influxql.BooleanLiteral); ok {
-						center = lit.Val
-					}
-				}
-				
-				// Calculate padding: (window_size - 1) * interval
-				padding := int64(windowSize-1) * int64(opt.Interval.Duration)
-				
-				if center {
-					// Split padding between start and end
-					startPad := int64(windowSize-1) / 2 * int64(opt.Interval.Duration)
-					endPad := (int64(windowSize-1) + 1) / 2 * int64(opt.Interval.Duration)
-					opt.StartTime -= startPad
-					opt.EndTime += endPad
-				} else {
-					// Only pad start time backward
-					opt.StartTime -= padding
-				}
 			}
 		}
 		opt.Ordered = true
@@ -330,30 +281,14 @@ func (b *exprIteratorBuilder) buildCallIterator(ctx context.Context, expr *influ
 			return newDifferenceIterator(input, opt, isNonNegative)
 		case "moving_average":
 			n := expr.Args[1].(*influxql.IntegerLiteral)
-			minPeriods := int(n.Val) // default to window size
-			center := false
-			
-			if len(expr.Args) >= 3 {
-				minPeriods = int(expr.Args[2].(*influxql.IntegerLiteral).Val)
+			if n.Val > 1 && !opt.Interval.IsZero() {
+				if opt.Ascending {
+					opt.StartTime -= int64(opt.Interval.Duration) * (n.Val - 1)
+				} else {
+					opt.EndTime += int64(opt.Interval.Duration) * (n.Val - 1)
+				}
 			}
-			if len(expr.Args) >= 4 {
-				center = expr.Args[3].(*influxql.BooleanLiteral).Val
-			}
-			
-			return newMovingAverageIteratorWithOptions(input, int(n.Val), minPeriods, center, opt)
-		case "moving_median":
-			n := expr.Args[1].(*influxql.IntegerLiteral)
-			minPeriods := int(n.Val) // default to window size
-			center := false
-			
-			if len(expr.Args) >= 3 {
-				minPeriods = int(expr.Args[2].(*influxql.IntegerLiteral).Val)
-			}
-			if len(expr.Args) >= 4 {
-				center = expr.Args[3].(*influxql.BooleanLiteral).Val
-			}
-			
-			return newMovingMedianIteratorWithOptions(input, int(n.Val), minPeriods, center, opt)
+			return newMovingAverageIterator(input, int(n.Val), opt)
 		case "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative":
 			n := expr.Args[1].(*influxql.IntegerLiteral)
 			if n.Val > 1 && !opt.Interval.IsZero() {
