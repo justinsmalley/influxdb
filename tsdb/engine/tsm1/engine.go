@@ -151,6 +151,7 @@ type Engine struct {
 	id           uint64
 	path         string
 	sfile        *tsdb.SeriesFile
+	store        *tsdb.Store // Reference to parent Store for centralized field mapping access
 	logger       *zap.Logger // Logger to be used for important messages
 	traceLogger  *zap.Logger // Logger to be used when trace-logging is on.
 	traceLogging bool
@@ -199,6 +200,18 @@ type Engine struct {
 
 	// muDigest ensures only one goroutine can generate a digest at a time.
 	muDigest sync.RWMutex
+}
+
+// NewEngine returns a new instance of Engine.
+func NewEngineWithStore(id uint64, idx tsdb.Index, path string, walPath string, sfile *tsdb.SeriesFile, opt tsdb.EngineOptions, store *tsdb.Store) tsdb.Engine {
+	e := NewEngine(id, idx, path, walPath, sfile, opt).(*Engine)
+	e.store = store
+	return e
+}
+
+// SetStore sets the store reference on the engine
+func (e *Engine) SetStore(store *tsdb.Store) {
+	e.store = store
 }
 
 // NewEngine returns a new instance of Engine.
@@ -2375,38 +2388,58 @@ func (e *Engine) CreateIterator(ctx context.Context, measurement string, opt que
 
 // translateFieldNamesInOptions translates field names in the iterator options from user-facing to internal names
 func (e *Engine) translateFieldNamesInOptions(measurement string, opt query.IteratorOptions) query.IteratorOptions {
-	// Get the measurement fields
-	mf := e.MeasurementFields([]byte(measurement))
-	if mf == nil {
+	// If no store reference, skip translation
+	if e.store == nil {
+		return opt
+	}
+
+	// Extract database name from path
+	// Path format: /base/database/retentionPolicy/shardID
+	cleanPath := filepath.Clean(e.path)
+	// Remove shard ID part
+	shardDir := filepath.Dir(cleanPath)
+	// Remove retention policy part
+	rpDir := filepath.Dir(shardDir)
+	// Extract database name
+	_, db := filepath.Split(rpDir)
+
+	if db == "" {
+		return opt
+	}
+
+	// Get the centralized field mapping store
+	fieldMappingStore, err := e.store.FieldMappingStore(db)
+	if err != nil {
+		// Store doesn't exist yet, skip translation
 		return opt
 	}
 
 	// Translate the expression
-	opt.Expr = e.translateExpr(opt.Expr, mf)
+	opt.Expr = e.translateExpr(opt.Expr, measurement, fieldMappingStore)
 
 	// Translate auxiliary fields
 	for i, aux := range opt.Aux {
-		if internalName, isActive := mf.GetInternalFieldName(aux.Val); isActive {
+		if internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, aux.Val); isActive {
 			opt.Aux[i].Val = internalName
 		}
 	}
 
 	// Translate WHERE clause condition
-	opt.Condition = e.translateExpr(opt.Condition, mf)
+	opt.Condition = e.translateExpr(opt.Condition, measurement, fieldMappingStore)
 
 	return opt
 }
 
 // translateExpr translates field names in an expression from user-facing to internal names
-func (e *Engine) translateExpr(expr influxql.Expr, mf *tsdb.MeasurementFields) influxql.Expr {
+func (e *Engine) translateExpr(expr influxql.Expr, measurement string, fieldMappingStore *tsdb.FieldMappingStore) influxql.Expr {
 	if expr == nil {
 		return nil
 	}
 
 	switch expr := expr.(type) {
 	case *influxql.VarRef:
-		// Translate the field name
-		if internalName, isActive := mf.GetInternalFieldName(expr.Val); isActive {
+		// Translate the field name using centralized store
+		if internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, expr.Val); isActive {
 			// Create a new VarRef with the internal name
 			newExpr := *expr
 			newExpr.Val = internalName
@@ -2418,19 +2451,19 @@ func (e *Engine) translateExpr(expr influxql.Expr, mf *tsdb.MeasurementFields) i
 		newCall := *expr
 		newCall.Args = make([]influxql.Expr, len(expr.Args))
 		for i, arg := range expr.Args {
-			newCall.Args[i] = e.translateExpr(arg, mf)
+			newCall.Args[i] = e.translateExpr(arg, measurement, fieldMappingStore)
 		}
 		return &newCall
 	case *influxql.BinaryExpr:
 		// Translate field names in binary expressions (e.g., WHERE clauses)
 		newBinary := *expr
-		newBinary.LHS = e.translateExpr(expr.LHS, mf)
-		newBinary.RHS = e.translateExpr(expr.RHS, mf)
+		newBinary.LHS = e.translateExpr(expr.LHS, measurement, fieldMappingStore)
+		newBinary.RHS = e.translateExpr(expr.RHS, measurement, fieldMappingStore)
 		return &newBinary
 	case *influxql.ParenExpr:
 		// Translate field names in parenthesized expressions
 		newParen := *expr
-		newParen.Expr = e.translateExpr(expr.Expr, mf)
+		newParen.Expr = e.translateExpr(expr.Expr, measurement, fieldMappingStore)
 		return &newParen
 	default:
 		return expr

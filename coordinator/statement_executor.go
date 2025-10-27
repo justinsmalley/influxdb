@@ -204,6 +204,8 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 		return e.executeShowTagKeys(stmt, ctx)
 	case *influxql.ShowTagValuesStatement:
 		return e.executeShowTagValues(stmt, ctx)
+	case *influxql.ShowFieldMappingsStatement:
+		return e.executeShowFieldMappingsStatement(stmt, ctx)
 	case *influxql.ShowUsersStatement:
 		rows, err = e.executeShowUsersStatement(stmt)
 	case *influxql.SetPasswordUserStatement:
@@ -440,152 +442,48 @@ func (e *StatementExecutor) executeRenameFieldStatement(q *influxql.RenameFieldS
 
 // Field operation methods
 
-// DropField soft deletes a field from a measurement across all shards
+// DropField soft deletes a field from a measurement
 func (e *StatementExecutor) DropField(database, measurement, fieldName string) error {
 	if dbi := e.MetaClient.Database(database); dbi == nil {
 		return query.ErrDatabaseNotFound(database)
 	}
 
-	// Cast MetaClient to *meta.Client to access ShardIDs
-	metaClient, ok := e.MetaClient.(*meta.Client)
-	if !ok {
-		return fmt.Errorf("MetaClient is not a *meta.Client")
-	}
-
-	// Get all shard IDs
-	allShardIDs := metaClient.ShardIDs()
-	if len(allShardIDs) == 0 {
-		return fmt.Errorf("no shards found")
-	}
-
-	// Cast TSDBStore to *tsdb.Store to access ShardGroup
+	// Cast TSDBStore to *tsdb.Store
 	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
 		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
 	}
 
-	// Get shards from the store
-	shards := store.ShardGroup(allShardIDs).(tsdb.Shards)
-	if len(shards) == 0 {
-		return fmt.Errorf("no shards available for database %s", database)
+	// Get the centralized field mapping store
+	fieldMappingStore, err := store.FieldMappingStore(database)
+	if err != nil {
+		return err
 	}
 
-	// Perform field operation on all shards
-	var lastErr error
-	successCount := 0
-	for _, shard := range shards {
-		engine, err := shard.Engine()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		mf := engine.MeasurementFields([]byte(measurement))
-		if mf == nil {
-			continue // Measurement doesn't exist on this shard
-		}
-
-		if err := mf.SoftDeleteField(fieldName); err != nil {
-			// Skip shards where the field doesn't exist (it might only exist on some shards)
-			if strings.Contains(err.Error(), "does not exist") {
-				continue
-			}
-			lastErr = err
-			continue
-		}
-
-		// Save the field mappings
-		if err := engine.MeasurementFieldSet().Save(); err != nil {
-			lastErr = err
-			continue
-		}
-
-		successCount++
-	}
-
-	// If the operation didn't succeed on any shard, return an error
-	if successCount == 0 {
-		if lastErr != nil {
-			return lastErr
-		}
-		return fmt.Errorf("field %s not found in measurement %s", fieldName, measurement)
-	}
-
-	return lastErr
+	// Single operation on centralized store - no shard iteration needed!
+	return fieldMappingStore.SoftDeleteField(measurement, fieldName)
 }
 
-// RenameField renames a field in a measurement across all shards
+// RenameField renames a field in a measurement
 func (e *StatementExecutor) RenameField(database, measurement, oldName, newName string) error {
 	if dbi := e.MetaClient.Database(database); dbi == nil {
 		return query.ErrDatabaseNotFound(database)
 	}
 
-	// Cast MetaClient to *meta.Client to access ShardIDs
-	metaClient, ok := e.MetaClient.(*meta.Client)
-	if !ok {
-		return fmt.Errorf("MetaClient is not a *meta.Client")
-	}
-
-	// Get all shard IDs
-	allShardIDs := metaClient.ShardIDs()
-	if len(allShardIDs) == 0 {
-		return fmt.Errorf("no shards found")
-	}
-
-	// Cast TSDBStore to *tsdb.Store to access ShardGroup
+	// Cast TSDBStore to *tsdb.Store
 	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
 		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
 	}
 
-	// Get shards from the store
-	shards := store.ShardGroup(allShardIDs).(tsdb.Shards)
-	if len(shards) == 0 {
-		return fmt.Errorf("no shards available for database %s", database)
+	// Get the centralized field mapping store
+	fieldMappingStore, err := store.FieldMappingStore(database)
+	if err != nil {
+		return err
 	}
 
-	// Perform field operation on all shards
-	var lastErr error
-	successCount := 0
-	for _, shard := range shards {
-		engine, err := shard.Engine()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		mf := engine.MeasurementFields([]byte(measurement))
-		if mf == nil {
-			continue // Measurement doesn't exist on this shard
-		}
-
-		if err := mf.RenameField(oldName, newName); err != nil {
-			// Skip shards where the field doesn't exist (it might only exist on some shards)
-			if strings.Contains(err.Error(), "does not exist") {
-				continue
-			}
-			lastErr = err
-			continue
-		}
-
-		// Save the field mappings
-		if err := engine.MeasurementFieldSet().Save(); err != nil {
-			lastErr = err
-			continue
-		}
-
-		successCount++
-	}
-
-	// If the operation didn't succeed on any shard, return an error
-	if successCount == 0 {
-		if lastErr != nil {
-			return lastErr
-		}
-		return fmt.Errorf("field %s not found in measurement %s", oldName, measurement)
-	}
-
-	return lastErr
+	// Single operation on centralized store - no shard iteration needed!
+	return fieldMappingStore.RenameField(measurement, oldName, newName)
 }
 
 func (e *StatementExecutor) executeExplainStatement(q *influxql.ExplainStatement, ctx *query.ExecutionContext) (models.Rows, error) {
@@ -1581,52 +1479,76 @@ func (e *StatementExecutor) translateResultFieldNames(row *models.Row, database 
 		return nil
 	}
 
-	// Cast TSDBStore to LocalTSDBStore to access shard methods
-	localStore, ok := e.TSDBStore.(*LocalTSDBStore)
+	// Cast TSDBStore to get the centralized field mapping store
+	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
-		// If not a LocalTSDBStore, we can't access field mappings
+		// If not a *tsdb.Store, we can't access field mappings
 		return nil
 	}
 
-	// Get all shard IDs
-	shardIDs := localStore.ShardIDs()
-	for _, shardID := range shardIDs {
-		shard := localStore.Shard(shardID)
-		if shard == nil {
-			continue
-		}
+	// Get the centralized field mapping store
+	fieldMappingStore, err := store.FieldMappingStore(database)
+	if err != nil {
+		// Field mapping store doesn't exist yet, skip translation
+		return nil
+	}
 
-		// Check if this shard has the measurement
-		engine, err := shard.Engine()
-		if err != nil {
-			continue
-		}
+	// Get mappings once
+	mappings := fieldMappingStore.GetAllMappings(measurementName)
 
-		mf := engine.MeasurementFields([]byte(measurementName))
-		if mf == nil {
-			continue
-		}
+	// Build map of internal name -> (userName, state)
+	internalToMapping := make(map[string]struct {
+		userName string
+		state    tsdb.FieldMappingState
+	})
+	for _, m := range mappings {
+		internalToMapping[m.InternalName] = struct {
+			userName string
+			state    tsdb.FieldMappingState
+		}{m.UserName, m.State}
+	}
 
-		// Translate column names
-		translatedColumns := make([]string, len(row.Columns))
-		for i, colName := range row.Columns {
-			if colName == "time" {
-				// Time column doesn't need translation
-				translatedColumns[i] = colName
-			} else {
-				// Translate field name from internal to user-facing
-				userName, exists := mf.GetUserFieldName(colName)
-				if exists {
-					translatedColumns[i] = userName
-				} else {
-					// No mapping found, use original name
-					translatedColumns[i] = colName
+	// Filter and translate columns - only include ACTIVE fields
+	translatedColumns := make([]string, 0, len(row.Columns))
+	columnIndices := make([]int, 0, len(row.Columns))
+
+	for i, colName := range row.Columns {
+		if colName == "time" {
+			// Time column doesn't need translation
+			translatedColumns = append(translatedColumns, colName)
+			columnIndices = append(columnIndices, i)
+		} else {
+			// Check if this internal name has a mapping
+			if mapping, exists := internalToMapping[colName]; exists {
+				// Only include ACTIVE fields
+				if mapping.state == tsdb.FieldMappingState_ACTIVE {
+					translatedColumns = append(translatedColumns, mapping.userName)
+					columnIndices = append(columnIndices, i)
 				}
+				// Skip DELETED and RENAMED fields
+			} else {
+				// No mapping - field exists but has no explicit mapping
+				// This is an unversioned field, include it
+				translatedColumns = append(translatedColumns, colName)
+				columnIndices = append(columnIndices, i)
 			}
 		}
+	}
 
-		row.Columns = translatedColumns
-		break
+	// Update row with filtered columns
+	row.Columns = translatedColumns
+
+	// Filter values to match filtered columns
+	if len(columnIndices) < len(row.Values) && len(row.Values) > 0 {
+		translatedValues := make([][]interface{}, len(row.Values))
+		for i, row := range row.Values {
+			filteredRow := make([]interface{}, len(columnIndices))
+			for j, idx := range columnIndices {
+				filteredRow[j] = row[idx]
+			}
+			translatedValues[i] = filteredRow
+		}
+		row.Values = translatedValues
 	}
 
 	return nil
@@ -1647,4 +1569,73 @@ func joinUint64(a []uint64) string {
 		}
 	}
 	return buf.String()
+}
+
+// executeShowFieldMappingsStatement executes a SHOW FIELD MAPPINGS statement
+func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.ShowFieldMappingsStatement, ctx *query.ExecutionContext) error {
+	database := stmt.Database
+	if database == "" {
+		database = ctx.Database
+	}
+	if database == "" {
+		return fmt.Errorf("database name required")
+	}
+
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+	}
+
+	fieldMappingStore, err := store.FieldMappingStore(database)
+	if err != nil {
+		return err
+	}
+
+	// Get measurement name from sources if specified
+	var measurement string
+	if stmt.Sources != nil && len(stmt.Sources) > 0 {
+		if m, ok := stmt.Sources[0].(*influxql.Measurement); ok {
+			measurement = m.Name
+		}
+	}
+
+	// Get all mappings
+	mappings := fieldMappingStore.GetAllMappings(measurement)
+
+	// Build result
+	columns := []string{"measurement", "user_name", "internal_name", "state"}
+	values := make([][]interface{}, 0, len(mappings))
+
+	for _, m := range mappings {
+		// Skip RENAMED state entries
+		if m.State == tsdb.FieldMappingState_RENAMED {
+			continue
+		}
+
+		stateStr := "ACTIVE"
+		var userName interface{}
+		if m.State == tsdb.FieldMappingState_DELETED {
+			stateStr = "DELETED"
+			userName = nil // null for deleted fields
+		} else {
+			userName = m.UserName
+		}
+
+		values = append(values, []interface{}{
+			m.Measurement,
+			userName,
+			m.InternalName,
+			stateStr,
+		})
+	}
+
+	row := &models.Row{
+		Name:    "field_mappings",
+		Columns: columns,
+		Values:  values,
+	}
+
+	return ctx.Send(&query.Result{
+		Series: []*models.Row{row},
+	})
 }

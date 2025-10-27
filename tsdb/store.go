@@ -100,6 +100,10 @@ type Store struct {
 	closing chan struct{}
 	wg      sync.WaitGroup
 	opened  bool
+
+	// Field mapping stores per database
+	fieldMappingStores map[string]*FieldMappingStore
+	fieldMappingMu     sync.RWMutex
 }
 
 // NewStore returns a new store with the given path and a default configuration.
@@ -116,6 +120,7 @@ func NewStore(path string) *Store {
 		EngineOptions:       NewEngineOptions(),
 		Logger:              logger,
 		baseLogger:          logger,
+		fieldMappingStores:  make(map[string]*FieldMappingStore),
 	}
 }
 
@@ -394,7 +399,7 @@ func (s *Store) loadShards() error {
 					}
 
 					// Open engine.
-					shard := NewShard(shardID, path, walPath, sfile, opt)
+					shard := NewShardWithStore(shardID, path, walPath, sfile, opt, s)
 
 					// Disable compactions, writes and queries until all shards are loaded
 					shard.EnableOnOpen = false
@@ -547,6 +552,35 @@ func (s *Store) createIndexIfNotExists(name string) (interface{}, error) {
 	return idx, nil
 }
 
+// FieldMappingStore returns the field mapping store for a database
+func (s *Store) FieldMappingStore(database string) (*FieldMappingStore, error) {
+	s.fieldMappingMu.RLock()
+	store, exists := s.fieldMappingStores[database]
+	s.fieldMappingMu.RUnlock()
+
+	if exists {
+		return store, nil
+	}
+
+	// Create new store
+	s.fieldMappingMu.Lock()
+	defer s.fieldMappingMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if store, exists := s.fieldMappingStores[database]; exists {
+		return store, nil
+	}
+
+	path := filepath.Join(s.path, database, "field_mappings")
+	store, err := NewFieldMappingStore(path)
+	if err != nil {
+		return nil, err
+	}
+
+	s.fieldMappingStores[database] = store
+	return store, nil
+}
+
 // Shard returns a shard by id.
 func (s *Store) Shard(id uint64) *Shard {
 	s.mu.RLock()
@@ -646,7 +680,7 @@ func (s *Store) CreateShard(database, retentionPolicy string, shardID uint64, en
 	opt.SeriesIDSets = shardSet{store: s, db: database}
 
 	path := filepath.Join(s.path, database, retentionPolicy, strconv.FormatUint(shardID, 10))
-	shard := NewShard(shardID, path, walPath, sfile, opt)
+	shard := NewShardWithStore(shardID, path, walPath, sfile, opt, s)
 	shard.WithLogger(s.baseLogger)
 	shard.EnableOnOpen = enabled
 
@@ -1109,7 +1143,6 @@ func (s *Store) sketchesForDatabase(dbName string, getSketches func(*Shard) (est
 //
 // Cardinality is calculated exactly by unioning all shards' bitsets of series
 // IDs. The result of this method cannot be combined with any other results.
-//
 func (s *Store) SeriesCardinality(database string) (int64, error) {
 	s.mu.RLock()
 	shards := s.filterShards(byDatabase(database))
@@ -1799,7 +1832,6 @@ func (s *Store) TagValues(auth query.Authorizer, shardIDs []uint64, cond influxq
 //
 // TODO(edd): a Tournament based merge (see: Knuth's TAOCP 5.4.1) might be more
 // appropriate at some point.
-//
 func mergeTagValues(valueIdxs [][2]int, tvs ...tagValues) TagValues {
 	var result TagValues
 	if len(tvs) == 0 {

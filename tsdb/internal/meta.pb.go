@@ -341,6 +341,92 @@ func (m *MeasurementFieldSet) GetMeasurements() []*MeasurementFields {
 	return nil
 }
 
+// FieldMappingSet stores centralized field mappings per database
+type FieldMappingSet struct {
+	Measurements         []*FieldMappingMeasurement `protobuf:"bytes,1,rep,name=Measurements,proto3" json:"Measurements,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}                   `json:"-"`
+	XXX_unrecognized     []byte                     `json:"-"`
+	XXX_sizecache        int32                      `json:"-"`
+}
+
+func (m *FieldMappingSet) Reset()         { *m = FieldMappingSet{} }
+func (m *FieldMappingSet) String() string { return proto.CompactTextString(m) }
+func (*FieldMappingSet) ProtoMessage()    {}
+func (*FieldMappingSet) Descriptor() ([]byte, []int) {
+	return fileDescriptor_3b5ea8fe65782bcc, []int{6}
+}
+func (m *FieldMappingSet) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_FieldMappingSet.Unmarshal(m, b)
+}
+func (m *FieldMappingSet) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_FieldMappingSet.Marshal(b, m, deterministic)
+}
+func (m *FieldMappingSet) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_FieldMappingSet.Merge(m, src)
+}
+func (m *FieldMappingSet) XXX_Size() int {
+	return xxx_messageInfo_FieldMappingSet.Size(m)
+}
+func (m *FieldMappingSet) XXX_DiscardUnknown() {
+	xxx_messageInfo_FieldMappingSet.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_FieldMappingSet proto.InternalMessageInfo
+
+func (m *FieldMappingSet) GetMeasurements() []*FieldMappingMeasurement {
+	if m != nil {
+		return m.Measurements
+	}
+	return nil
+}
+
+// FieldMappingMeasurement represents field mappings for a single measurement
+type FieldMappingMeasurement struct {
+	Name                 []byte          `protobuf:"bytes,1,opt,name=Name,proto3" json:"Name,omitempty"`
+	Mappings             []*FieldMapping `protobuf:"bytes,2,rep,name=Mappings,proto3" json:"Mappings,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}        `json:"-"`
+	XXX_unrecognized     []byte          `json:"-"`
+	XXX_sizecache        int32           `json:"-"`
+}
+
+func (m *FieldMappingMeasurement) Reset()         { *m = FieldMappingMeasurement{} }
+func (m *FieldMappingMeasurement) String() string { return proto.CompactTextString(m) }
+func (*FieldMappingMeasurement) ProtoMessage()    {}
+func (*FieldMappingMeasurement) Descriptor() ([]byte, []int) {
+	return fileDescriptor_3b5ea8fe65782bcc, []int{7}
+}
+func (m *FieldMappingMeasurement) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_FieldMappingMeasurement.Unmarshal(m, b)
+}
+func (m *FieldMappingMeasurement) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_FieldMappingMeasurement.Marshal(b, m, deterministic)
+}
+func (m *FieldMappingMeasurement) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_FieldMappingMeasurement.Merge(m, src)
+}
+func (m *FieldMappingMeasurement) XXX_Size() int {
+	return xxx_messageInfo_FieldMappingMeasurement.Size(m)
+}
+func (m *FieldMappingMeasurement) XXX_DiscardUnknown() {
+	xxx_messageInfo_FieldMappingMeasurement.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_FieldMappingMeasurement proto.InternalMessageInfo
+
+func (m *FieldMappingMeasurement) GetName() []byte {
+	if m != nil {
+		return m.Name
+	}
+	return nil
+}
+
+func (m *FieldMappingMeasurement) GetMappings() []*FieldMapping {
+	if m != nil {
+		return m.Mappings
+	}
+	return nil
+}
+
 func init() {
 	proto.RegisterEnum("tsdb.FieldMappingState", FieldMappingState_name, FieldMappingState_value)
 	proto.RegisterType((*Series)(nil), "tsdb.Series")
@@ -349,6 +435,8 @@ func init() {
 	proto.RegisterType((*Field)(nil), "tsdb.Field")
 	proto.RegisterType((*FieldMapping)(nil), "tsdb.FieldMapping")
 	proto.RegisterType((*MeasurementFieldSet)(nil), "tsdb.MeasurementFieldSet")
+	proto.RegisterType((*FieldMappingSet)(nil), "tsdb.FieldMappingSet")
+	proto.RegisterType((*FieldMappingMeasurement)(nil), "tsdb.FieldMappingMeasurement")
 }
 
 func init() { proto.RegisterFile("meta.proto", fileDescriptor_3b5ea8fe65782bcc) }

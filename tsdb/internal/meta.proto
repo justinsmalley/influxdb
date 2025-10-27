@@ -47,3 +47,13 @@ enum FieldMappingState {
 message MeasurementFieldSet {
 	repeated MeasurementFields Measurements = 1;
 }
+
+// FieldMappingSet stores centralized field mappings per database
+message FieldMappingSet {
+	repeated FieldMappingMeasurement Measurements = 1;
+}
+
+message FieldMappingMeasurement {
+	bytes Name = 1;                            // Measurement name
+	repeated FieldMapping Mappings = 2;        // Field mappings for this measurement
+}

@@ -123,10 +123,14 @@ func RegisteredEngines() []string {
 
 // NewEngine returns an instance of an engine based on its format.
 // If the path does not exist then the DefaultFormat is used.
-func NewEngine(id uint64, i Index, path string, walPath string, sfile *SeriesFile, options EngineOptions) (Engine, error) {
+func NewEngineWithStore(id uint64, i Index, path string, walPath string, sfile *SeriesFile, options EngineOptions, store *Store) (Engine, error) {
 	// Create a new engine
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		engine := newEngineFuncs[options.EngineVersion](id, i, path, walPath, sfile, options)
+		// Set store reference on the engine
+		if e, ok := engine.(interface{ SetStore(*Store) }); ok {
+			e.SetStore(store)
+		}
 		if options.OnNewEngine != nil {
 			options.OnNewEngine(engine)
 		}
@@ -150,10 +154,18 @@ func NewEngine(id uint64, i Index, path string, walPath string, sfile *SeriesFil
 	}
 
 	engine := fn(id, i, path, walPath, sfile, options)
+	// Set store reference on the engine
+	if e, ok := engine.(interface{ SetStore(*Store) }); ok {
+		e.SetStore(store)
+	}
 	if options.OnNewEngine != nil {
 		options.OnNewEngine(engine)
 	}
 	return engine, nil
+}
+
+func NewEngine(id uint64, i Index, path string, walPath string, sfile *SeriesFile, options EngineOptions) (Engine, error) {
+	return NewEngineWithStore(id, i, path, walPath, sfile, options, nil)
 }
 
 // EngineOptions represents the options used to initialize the engine.
