@@ -2046,18 +2046,28 @@ func (itr *fieldKeysIterator) Next() (*query.FloatPoint, error) {
 						}
 
 						// Map user-facing names to types from internal names
+						// Build reverse map: user -> internal
+						userToInternal := make(map[string]string)
+						for internalName, userName := range internalToUser {
+							userToInternal[userName] = internalName
+						}
+
+						// Now map each user-facing key to its type
 						for _, userFacingKey := range userFacingKeys {
 							// Find the internal name for this user-facing key
-							for internalName, fieldType := range fset {
-								// Check if this internal name maps to the user-facing key
-								if mappedUser, exists := internalToUser[internalName]; exists && mappedUser == userFacingKey {
+							if internalName, exists := userToInternal[userFacingKey]; exists {
+								// This is a mapped field - get type from internal name
+								if fieldType, ok := fset[internalName]; ok {
 									userFacingFieldMap[userFacingKey] = fieldType
-									break
-								} else if !exists && internalName == userFacingKey {
-									// No mapping - internal and user names are the same
-									userFacingFieldMap[userFacingKey] = fieldType
-									break
+									continue
 								}
+							}
+							// No mapping or direct match - internal and user names are the same
+							if fieldType, ok := fset[userFacingKey]; ok {
+								userFacingFieldMap[userFacingKey] = fieldType
+							} else {
+								// Field type not found, use Unknown as fallback
+								userFacingFieldMap[userFacingKey] = influxql.Unknown
 							}
 						}
 					} else {

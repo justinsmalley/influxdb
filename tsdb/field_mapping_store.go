@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/gogo/protobuf/proto"
@@ -256,6 +257,9 @@ func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldN
 		result = append(result, name)
 	}
 
+	// Sort to ensure deterministic iteration order
+	sort.Strings(result)
+
 	return result
 }
 
@@ -269,7 +273,15 @@ func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingIn
 	if measurement != "" {
 		// Return mappings for specific measurement
 		if measurementMappings, exists := s.mappings[measurement]; exists {
-			for _, mapping := range measurementMappings {
+			// Sort user names to ensure deterministic iteration order
+			userNames := make([]string, 0, len(measurementMappings))
+			for userName := range measurementMappings {
+				userNames = append(userNames, userName)
+			}
+			sort.Strings(userNames)
+
+			for _, userName := range userNames {
+				mapping := measurementMappings[userName]
 				result = append(result, &FieldMappingInfo{
 					Measurement:  measurement,
 					UserName:     mapping.UserName,
@@ -281,8 +293,24 @@ func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingIn
 		}
 	} else {
 		// Return all mappings
-		for meas, measurementMappings := range s.mappings {
-			for _, mapping := range measurementMappings {
+		// Sort measurement names to ensure deterministic iteration order
+		measurementNames := make([]string, 0, len(s.mappings))
+		for meas := range s.mappings {
+			measurementNames = append(measurementNames, meas)
+		}
+		sort.Strings(measurementNames)
+
+		for _, meas := range measurementNames {
+			measurementMappings := s.mappings[meas]
+			// Sort user names to ensure deterministic iteration order
+			userNames := make([]string, 0, len(measurementMappings))
+			for userName := range measurementMappings {
+				userNames = append(userNames, userName)
+			}
+			sort.Strings(userNames)
+
+			for _, userName := range userNames {
+				mapping := measurementMappings[userName]
 				result = append(result, &FieldMappingInfo{
 					Measurement:  meas,
 					UserName:     mapping.UserName,

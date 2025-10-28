@@ -1602,6 +1602,15 @@ func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.Sho
 	// Get all mappings
 	mappings := fieldMappingStore.GetAllMappings(measurement)
 
+	// Sort mappings for deterministic output order
+	// Sort by measurement name first, then by user_name
+	sort.Slice(mappings, func(i, j int) bool {
+		if mappings[i].Measurement != mappings[j].Measurement {
+			return mappings[i].Measurement < mappings[j].Measurement
+		}
+		return mappings[i].UserName < mappings[j].UserName
+	})
+
 	// Build result
 	columns := []string{"measurement", "user_name", "internal_name", "state"}
 	values := make([][]interface{}, 0, len(mappings))
