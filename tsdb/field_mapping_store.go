@@ -259,19 +259,25 @@ func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldN
 	for _, internalName := range internalFieldNames {
 		// Find the active user name for this internal name
 		var activeUserName string
+		hasAnyMapping := false
+
 		for _, m := range measurementMappings {
-			if m.InternalName == internalName && m.State == FieldMappingState_ACTIVE {
-				activeUserName = m.UserName
-				break
+			if m.InternalName == internalName {
+				hasAnyMapping = true
+				if m.State == FieldMappingState_ACTIVE {
+					activeUserName = m.UserName
+					break
+				}
 			}
 		}
 
 		if activeUserName != "" {
 			userNames[activeUserName] = true
-		} else {
-			// No active mapping for this internal name (might be implicit)
+		} else if !hasAnyMapping {
+			// No mapping at all for this internal name (implicit field)
 			userNames[internalName] = true
 		}
+		// If hasAnyMapping but no activeUserName, it's deleted/renamed, so we skip it entirely
 	}
 
 	// Convert map to slice

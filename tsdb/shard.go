@@ -1003,9 +1003,42 @@ func (s *Shard) FieldDimensions(measurements []string) (fields map[string]influx
 		// Append fields and dimensions.
 		mf := engine.MeasurementFields([]byte(name))
 		if mf != nil {
-			for k, typ := range mf.FieldSet() {
-				if fields[k].LessThan(typ) {
-					fields[k] = typ
+			var fieldMappingStore *FieldMappingStore
+			if s.store != nil && s.database != "" {
+				fieldMappingStore, _ = s.store.FieldMappingStore(s.database)
+			}
+
+			for internalName, typ := range mf.FieldSet() {
+				// Determine user-facing name
+				userFacingName := internalName
+				if fieldMappingStore != nil {
+					// We only want to include ACTIVE fields
+					mappings := fieldMappingStore.GetAllMappings(name)
+
+					// Find mapping for this internal name
+					isActive := true // Default to active if no mapping explicitly marks it otherwise
+					hasExplicitMapping := false
+
+					for _, m := range mappings {
+						if m.InternalName == internalName {
+							hasExplicitMapping = true
+							if m.State == FieldMappingState_ACTIVE {
+								userFacingName = m.UserName
+							} else {
+								isActive = false
+							}
+							break
+						}
+					}
+
+					// Skip if marked as deleted/renamed
+					if hasExplicitMapping && !isActive {
+						continue
+					}
+				}
+
+				if fields[userFacingName].LessThan(typ) {
+					fields[userFacingName] = typ
 				}
 			}
 		}
@@ -1060,7 +1093,20 @@ func (s *Shard) mapType(measurement, field string) (influxql.DataType, error) {
 
 	mf := engine.MeasurementFields([]byte(measurement))
 	if mf != nil {
-		f := mf.Field(field)
+		internalField := field
+		// Translate user-facing name to internal name
+		if s.store != nil && s.database != "" {
+			if fieldMappingStore, err := s.store.FieldMappingStore(s.database); err == nil {
+				if internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, field); isActive {
+					internalField = internalName
+				} else {
+					// Field exists but is not active (e.g. deleted)
+					return influxql.Unknown, nil
+				}
+			}
+		}
+
+		f := mf.Field(internalField)
 		if f != nil {
 			return f.Type, nil
 		}
