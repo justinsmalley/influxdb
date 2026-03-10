@@ -34,8 +34,8 @@ const (
 // Uses a writer-preferred RWMutex to prevent writer starvation
 type FieldMappingStore struct {
 	mu       sync.RWMutex
-	mappings map[string]map[string]*FieldMapping // measurement -> fieldName -> mapping
-	path     string                              // persistence file path
+	mappings map[string][]*FieldMapping // measurement -> list of mappings
+	path     string                     // persistence file path
 }
 
 // FieldMappingInfo is returned by GetAllMappings for display purposes
@@ -50,7 +50,7 @@ type FieldMappingInfo struct {
 // NewFieldMappingStore creates a new field mapping store
 func NewFieldMappingStore(path string) (*FieldMappingStore, error) {
 	store := &FieldMappingStore{
-		mappings: make(map[string]map[string]*FieldMapping),
+		mappings: make(map[string][]*FieldMapping),
 		path:     path,
 	}
 	return store, store.load()
@@ -66,16 +66,21 @@ func (s *FieldMappingStore) GetInternalFieldName(measurement, userName string) (
 		return userName, true // implicit identity mapping
 	}
 
-	mapping, exists := measurementMappings[userName]
-	if !exists {
-		return userName, true // implicit identity mapping
+	hasAny := false
+	for _, m := range measurementMappings {
+		if m.UserName == userName {
+			hasAny = true
+			if m.State == FieldMappingState_ACTIVE {
+				return m.InternalName, true
+			}
+		}
 	}
 
-	if mapping.State == FieldMappingState_ACTIVE {
-		return mapping.InternalName, true
+	if hasAny {
+		return "", false // field exists but is not active (deleted or renamed)
 	}
 
-	return "", false // field exists but is not active
+	return userName, true // implicit identity mapping
 }
 
 // RenameField renames a field across the entire database
@@ -83,7 +88,6 @@ func (s *FieldMappingStore) RenameField(measurement, oldName, newName string) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Validate both names
 	if err := ValidateFieldName(oldName); err != nil {
 		return fmt.Errorf("invalid old field name: %w", err)
 	}
@@ -91,15 +95,35 @@ func (s *FieldMappingStore) RenameField(measurement, oldName, newName string) er
 		return fmt.Errorf("invalid new field name: %w", err)
 	}
 
-	// Get or create measurement mappings
 	if _, exists := s.mappings[measurement]; !exists {
-		s.mappings[measurement] = make(map[string]*FieldMapping)
+		s.mappings[measurement] = make([]*FieldMapping, 0)
 	}
-	measurementMappings := s.mappings[measurement]
+	measMappings := s.mappings[measurement]
 
-	// Check if old field exists and is active
-	oldMapping, exists := measurementMappings[oldName]
-	if !exists {
+	// Check if new name already exists and is active
+	for _, m := range measMappings {
+		if m.UserName == newName && m.State == FieldMappingState_ACTIVE {
+			return fmt.Errorf("field %s already exists and is active", newName)
+		}
+	}
+
+	// Find the active old mapping
+	var oldMapping *FieldMapping
+	for _, m := range measMappings {
+		if m.UserName == oldName && m.State == FieldMappingState_ACTIVE {
+			oldMapping = m
+			break
+		}
+	}
+
+	if oldMapping == nil {
+		// Check if it was explicitly deleted
+		for _, m := range measMappings {
+			if m.UserName == oldName {
+				return fmt.Errorf("field %s is not active", oldName)
+			}
+		}
+
 		// Create explicit mapping for implicit field (v1)
 		oldMapping = &FieldMapping{
 			UserName:     oldName,
@@ -107,21 +131,11 @@ func (s *FieldMappingStore) RenameField(measurement, oldName, newName string) er
 			Version:      1,
 			State:        FieldMappingState_ACTIVE,
 		}
-	} else if oldMapping.State != FieldMappingState_ACTIVE {
-		return fmt.Errorf("field %s is not active (state: %v)", oldName, oldMapping.State)
-	}
-
-	// Check if new name already exists
-	if existingMapping, newExists := measurementMappings[newName]; newExists {
-		if existingMapping.State == FieldMappingState_ACTIVE {
-			return fmt.Errorf("field %s already exists and is active", newName)
-		}
-		return fmt.Errorf("field %s already exists", newName)
+		s.mappings[measurement] = append(s.mappings[measurement], oldMapping)
 	}
 
 	// Mark old mapping as renamed
 	oldMapping.State = FieldMappingState_RENAMED
-	measurementMappings[oldName] = oldMapping
 
 	// Create new mapping pointing to same internal name
 	newMapping := &FieldMapping{
@@ -130,7 +144,7 @@ func (s *FieldMappingStore) RenameField(measurement, oldName, newName string) er
 		Version:      oldMapping.Version,
 		State:        FieldMappingState_ACTIVE,
 	}
-	measurementMappings[newName] = newMapping
+	s.mappings[measurement] = append(s.mappings[measurement], newMapping)
 
 	return s.save()
 }
@@ -140,20 +154,32 @@ func (s *FieldMappingStore) SoftDeleteField(measurement, userName string) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Validate field name
 	if err := ValidateFieldName(userName); err != nil {
 		return fmt.Errorf("invalid field name: %w", err)
 	}
 
-	// Get or create measurement mappings
 	if _, exists := s.mappings[measurement]; !exists {
-		s.mappings[measurement] = make(map[string]*FieldMapping)
+		s.mappings[measurement] = make([]*FieldMapping, 0)
 	}
-	measurementMappings := s.mappings[measurement]
+	measMappings := s.mappings[measurement]
 
-	// Check if field exists and is active
-	mapping, exists := measurementMappings[userName]
-	if !exists {
+	// Find the active mapping
+	var mapping *FieldMapping
+	for _, m := range measMappings {
+		if m.UserName == userName && m.State == FieldMappingState_ACTIVE {
+			mapping = m
+			break
+		}
+	}
+
+	if mapping == nil {
+		// Check if it was already deleted
+		for _, m := range measMappings {
+			if m.UserName == userName {
+				return fmt.Errorf("field %s is not active", userName)
+			}
+		}
+
 		// Create explicit mapping for implicit field (v1)
 		mapping = &FieldMapping{
 			UserName:     userName,
@@ -161,13 +187,11 @@ func (s *FieldMappingStore) SoftDeleteField(measurement, userName string) error 
 			Version:      1,
 			State:        FieldMappingState_ACTIVE,
 		}
-	} else if mapping.State != FieldMappingState_ACTIVE {
-		return fmt.Errorf("field %s is not active (state: %v)", userName, mapping.State)
+		s.mappings[measurement] = append(s.mappings[measurement], mapping)
 	}
 
 	// Mark as deleted
 	mapping.State = FieldMappingState_DELETED
-	measurementMappings[userName] = mapping
 
 	return s.save()
 }
@@ -177,40 +201,39 @@ func (s *FieldMappingStore) CreateFieldMapping(measurement, userName string) (st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Validate field name
 	if err := ValidateFieldName(userName); err != nil {
 		return "", fmt.Errorf("invalid field name: %w", err)
 	}
 
-	// Get or create measurement mappings
 	if _, exists := s.mappings[measurement]; !exists {
-		s.mappings[measurement] = make(map[string]*FieldMapping)
+		s.mappings[measurement] = make([]*FieldMapping, 0)
 	}
-	measurementMappings := s.mappings[measurement]
+	measMappings := s.mappings[measurement]
 
 	// Check if there's already an active field with this user name
-	if existingMapping, exists := measurementMappings[userName]; exists && existingMapping.State == FieldMappingState_ACTIVE {
-		return existingMapping.InternalName, nil // Return existing mapping
+	for _, m := range measMappings {
+		if m.UserName == userName && m.State == FieldMappingState_ACTIVE {
+			return m.InternalName, nil // Return existing
+		}
 	}
 
-	// Find next version number
+	// Find next version number across all mappings for this user name
 	nextVersion := int64(2) // Start from v2 since v1 is implicit
-	for _, mapping := range measurementMappings {
-		if mapping.UserName == userName && mapping.Version >= nextVersion {
-			nextVersion = mapping.Version + 1
+	for _, m := range measMappings {
+		if m.UserName == userName && m.Version >= nextVersion {
+			nextVersion = m.Version + 1
 		}
 	}
 
 	internalName := fmt.Sprintf("%s.v%d", userName, nextVersion)
 
-	// Create new mapping
 	newMapping := &FieldMapping{
 		UserName:     userName,
 		InternalName: internalName,
 		Version:      nextVersion,
 		State:        FieldMappingState_ACTIVE,
 	}
-	measurementMappings[userName] = newMapping
+	s.mappings[measurement] = append(s.mappings[measurement], newMapping)
 
 	if err := s.save(); err != nil {
 		return "", err
@@ -231,22 +254,22 @@ func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldN
 		return internalFieldNames
 	}
 
-	// Build maps for translation
-	internalToUser := make(map[string]string)
-	for _, m := range measurementMappings {
-		if m.State == FieldMappingState_ACTIVE {
-			internalToUser[m.InternalName] = m.UserName
-		}
-	}
-
 	// Translate and deduplicate
 	userNames := make(map[string]bool)
 	for _, internalName := range internalFieldNames {
-		if userFacing, exists := internalToUser[internalName]; exists {
-			// This internal name has a user-facing mapping
-			userNames[userFacing] = true
+		// Find the active user name for this internal name
+		var activeUserName string
+		for _, m := range measurementMappings {
+			if m.InternalName == internalName && m.State == FieldMappingState_ACTIVE {
+				activeUserName = m.UserName
+				break
+			}
+		}
+
+		if activeUserName != "" {
+			userNames[activeUserName] = true
 		} else {
-			// No mapping - use internal name
+			// No active mapping for this internal name (might be implicit)
 			userNames[internalName] = true
 		}
 	}
@@ -257,9 +280,7 @@ func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldN
 		result = append(result, name)
 	}
 
-	// Sort to ensure deterministic iteration order
 	sort.Strings(result)
-
 	return result
 }
 
@@ -271,29 +292,19 @@ func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingIn
 	var result []*FieldMappingInfo
 
 	if measurement != "" {
-		// Return mappings for specific measurement
-		if measurementMappings, exists := s.mappings[measurement]; exists {
-			// Sort user names to ensure deterministic iteration order
-			userNames := make([]string, 0, len(measurementMappings))
-			for userName := range measurementMappings {
-				userNames = append(userNames, userName)
-			}
-			sort.Strings(userNames)
-
-			for _, userName := range userNames {
-				mapping := measurementMappings[userName]
+		if measMappings, exists := s.mappings[measurement]; exists {
+			for _, m := range measMappings {
 				result = append(result, &FieldMappingInfo{
 					Measurement:  measurement,
-					UserName:     mapping.UserName,
-					InternalName: mapping.InternalName,
-					Version:      mapping.Version,
-					State:        mapping.State,
+					UserName:     m.UserName,
+					InternalName: m.InternalName,
+					Version:      m.Version,
+					State:        m.State,
 				})
 			}
 		}
 	} else {
-		// Return all mappings
-		// Sort measurement names to ensure deterministic iteration order
+		// Return all mappings, sort measurements first
 		measurementNames := make([]string, 0, len(s.mappings))
 		for meas := range s.mappings {
 			measurementNames = append(measurementNames, meas)
@@ -301,22 +312,13 @@ func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingIn
 		sort.Strings(measurementNames)
 
 		for _, meas := range measurementNames {
-			measurementMappings := s.mappings[meas]
-			// Sort user names to ensure deterministic iteration order
-			userNames := make([]string, 0, len(measurementMappings))
-			for userName := range measurementMappings {
-				userNames = append(userNames, userName)
-			}
-			sort.Strings(userNames)
-
-			for _, userName := range userNames {
-				mapping := measurementMappings[userName]
+			for _, m := range s.mappings[meas] {
 				result = append(result, &FieldMappingInfo{
 					Measurement:  meas,
-					UserName:     mapping.UserName,
-					InternalName: mapping.InternalName,
-					Version:      mapping.Version,
-					State:        mapping.State,
+					UserName:     m.UserName,
+					InternalName: m.InternalName,
+					Version:      m.Version,
+					State:        m.State,
 				})
 			}
 		}
@@ -327,18 +329,17 @@ func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingIn
 
 // save serializes the mappings to disk using protobuf
 func (s *FieldMappingStore) save() error {
-	// Create protobuf message
 	pb := internal.FieldMappingSet{
 		Measurements: make([]*internal.FieldMappingMeasurement, 0, len(s.mappings)),
 	}
 
-	for measurement, measurementMappings := range s.mappings {
+	for measurement, measMappings := range s.mappings {
 		meas := &internal.FieldMappingMeasurement{
 			Name:     []byte(measurement),
-			Mappings: make([]*internal.FieldMapping, 0, len(measurementMappings)),
+			Mappings: make([]*internal.FieldMapping, 0, len(measMappings)),
 		}
 
-		for _, mapping := range measurementMappings {
+		for _, mapping := range measMappings {
 			meas.Mappings = append(meas.Mappings, &internal.FieldMapping{
 				UserName:     mapping.UserName,
 				InternalName: mapping.InternalName,
@@ -346,11 +347,9 @@ func (s *FieldMappingStore) save() error {
 				State:        internal.FieldMappingState(mapping.State),
 			})
 		}
-
 		pb.Measurements = append(pb.Measurements, meas)
 	}
 
-	// Marshal to protobuf
 	b, err := proto.Marshal(&pb)
 	if err != nil {
 		return err
@@ -383,7 +382,6 @@ func (s *FieldMappingStore) save() error {
 
 // load deserializes mappings from disk
 func (s *FieldMappingStore) load() error {
-	// Create directory if it doesn't exist
 	if err := os.MkdirAll(filepath.Dir(s.path), 0777); err != nil {
 		return err
 	}
@@ -391,46 +389,40 @@ func (s *FieldMappingStore) load() error {
 	f, err := os.Open(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// No existing mappings - that's OK
 			return nil
 		}
 		return err
 	}
 	defer f.Close()
 
-	// Read file
 	b, err := ioutil.ReadAll(f)
 	if err != nil {
 		return err
 	}
 
 	if len(b) == 0 {
-		// Empty file - that's OK
 		return nil
 	}
 
-	// Unmarshal protobuf
 	var pb internal.FieldMappingSet
 	if err := proto.Unmarshal(b, &pb); err != nil {
 		return err
 	}
 
-	// Convert to internal structure
-	s.mappings = make(map[string]map[string]*FieldMapping)
+	s.mappings = make(map[string][]*FieldMapping)
 	for _, meas := range pb.Measurements {
 		measurement := string(meas.Name)
-		measurementMappings := make(map[string]*FieldMapping)
+		measMappings := make([]*FieldMapping, 0, len(meas.Mappings))
 
 		for _, mapping := range meas.Mappings {
-			measurementMappings[mapping.UserName] = &FieldMapping{
+			measMappings = append(measMappings, &FieldMapping{
 				UserName:     mapping.UserName,
 				InternalName: mapping.InternalName,
 				Version:      mapping.Version,
 				State:        FieldMappingState(mapping.State),
-			}
+			})
 		}
-
-		s.mappings[measurement] = measurementMappings
+		s.mappings[measurement] = measMappings
 	}
 
 	return nil
