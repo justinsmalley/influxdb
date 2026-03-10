@@ -104,6 +104,9 @@ type Store struct {
 	// Field mapping stores per database
 	fieldMappingStores map[string]*FieldMappingStore
 	fieldMappingMu     sync.RWMutex
+
+	measurementMappingStores map[string]*MeasurementMappingStore
+	measurementMappingMu     sync.RWMutex
 }
 
 // NewStore returns a new store with the given path and a default configuration.
@@ -111,16 +114,17 @@ type Store struct {
 func NewStore(path string) *Store {
 	logger := zap.NewNop()
 	return &Store{
-		databases:           make(map[string]*databaseState),
-		path:                path,
-		sfiles:              make(map[string]*SeriesFile),
-		indexes:             make(map[string]interface{}),
-		pendingShardDeletes: make(map[uint64]struct{}),
-		epochs:              make(map[uint64]*epochTracker),
-		EngineOptions:       NewEngineOptions(),
-		Logger:              logger,
-		baseLogger:          logger,
-		fieldMappingStores:  make(map[string]*FieldMappingStore),
+		databases:                make(map[string]*databaseState),
+		path:                     path,
+		sfiles:                   make(map[string]*SeriesFile),
+		indexes:                  make(map[string]interface{}),
+		pendingShardDeletes:      make(map[uint64]struct{}),
+		epochs:                   make(map[uint64]*epochTracker),
+		EngineOptions:            NewEngineOptions(),
+		Logger:                   logger,
+		baseLogger:               logger,
+		fieldMappingStores:       make(map[string]*FieldMappingStore),
+		measurementMappingStores: make(map[string]*MeasurementMappingStore),
 	}
 }
 
@@ -895,6 +899,15 @@ func (s *Store) DeleteDatabase(name string) error {
 	// Remove shared index for database if using inmem index.
 	delete(s.indexes, name)
 
+	// Remove field and measurement mapping stores from cache
+	s.fieldMappingMu.Lock()
+	delete(s.fieldMappingStores, name)
+	s.fieldMappingMu.Unlock()
+
+	s.measurementMappingMu.Lock()
+	delete(s.measurementMappingStores, name)
+	s.measurementMappingMu.Unlock()
+
 	return nil
 }
 
@@ -964,6 +977,19 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 	epochs := s.epochsForShards(shards)
 	s.mu.RUnlock()
 
+	// Handle measurement mappings: resolve internal name and soft delete
+	internalName := name
+	if store, err := s.MeasurementMappingStore(database); err == nil {
+		if internal, isActive := store.GetInternalMeasurementName(name); isActive {
+			internalName = internal
+		}
+
+		// Soft delete it in the mapping store
+		if err := store.SoftDeleteMeasurement(name); err != nil {
+			// If it fails because it's already not active, that's fine, continue to drop underlying data just in case
+		}
+	}
+
 	// Limit to 1 delete for each shard since expanding the measurement into the list
 	// of series keys can be very memory intensive if run concurrently.
 	limit := limiter.NewFixed(1)
@@ -973,12 +999,12 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 
 		// install our guard and wait for any prior deletes to finish. the
 		// guard ensures future deletes that could conflict wait for us.
-		guard := newGuard(influxql.MinTime, influxql.MaxTime, []string{name}, nil)
+		guard := newGuard(influxql.MinTime, influxql.MaxTime, []string{internalName}, nil)
 		waiter := epochs[sh.id].WaitDelete(guard)
 		waiter.Wait()
 		defer waiter.Done()
 
-		return sh.DeleteMeasurement([]byte(name))
+		return sh.DeleteMeasurement([]byte(internalName))
 	})
 }
 
@@ -2119,4 +2145,37 @@ func (s shardSet) ForEach(f func(ids *SeriesIDSet)) error {
 		f(idx.SeriesIDSet())
 	}
 	return nil
+}
+
+// MeasurementMappingStore returns the measurement mapping store for a database
+func (s *Store) MeasurementMappingStore(database string) (*MeasurementMappingStore, error) {
+	s.measurementMappingMu.RLock()
+	store, exists := s.measurementMappingStores[database]
+	s.measurementMappingMu.RUnlock()
+
+	if exists {
+		return store, nil
+	}
+
+	// Create new store
+	s.measurementMappingMu.Lock()
+	defer s.measurementMappingMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if store, exists := s.measurementMappingStores[database]; exists {
+		return store, nil
+	}
+
+	// Path: <db_path>/measurement_mappings.idx
+	// We'll store it alongside the retention policy directories in the database folder
+	dbPath := filepath.Join(s.path, database)
+	mappingPath := filepath.Join(dbPath, "measurement_mappings.idx")
+
+	store, err := NewMeasurementMappingStore(mappingPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open measurement mapping store: %v", err)
+	}
+
+	s.measurementMappingStores[database] = store
+	return store, nil
 }

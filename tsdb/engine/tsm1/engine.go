@@ -2350,8 +2350,8 @@ func (e *Engine) CreateIterator(ctx context.Context, measurement string, opt que
 		defer group.GetTimer(planningTimer).UpdateSince(start)
 	}
 
-	// Translate field names from user-facing to internal names
-	opt = e.translateFieldNamesInOptions(measurement, opt)
+	// Translate measurement and field names from user-facing to internal names
+	measurement, opt = e.translateNamesInOptions(measurement, opt)
 
 	if call, ok := opt.Expr.(*influxql.Call); ok {
 		if opt.Interval.IsZero() {
@@ -2386,11 +2386,11 @@ func (e *Engine) CreateIterator(ctx context.Context, measurement string, opt que
 	return newMergeFinalizerIterator(ctx, itrs, opt, e.logger)
 }
 
-// translateFieldNamesInOptions translates field names in the iterator options from user-facing to internal names
-func (e *Engine) translateFieldNamesInOptions(measurement string, opt query.IteratorOptions) query.IteratorOptions {
+// translateNamesInOptions translates measurement and field names in the iterator options from user-facing to internal names
+func (e *Engine) translateNamesInOptions(measurement string, opt query.IteratorOptions) (string, query.IteratorOptions) {
 	// If no store reference, skip translation
 	if e.store == nil {
-		return opt
+		return measurement, opt
 	}
 
 	// Extract database name from path
@@ -2404,30 +2404,39 @@ func (e *Engine) translateFieldNamesInOptions(measurement string, opt query.Iter
 	_, db := filepath.Split(rpDir)
 
 	if db == "" {
-		return opt
+		return measurement, opt
+	}
+
+	internalMeasurement := measurement
+
+	// Translate measurement name
+	if measMappingStore, err := e.store.MeasurementMappingStore(db); err == nil {
+		if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
+			internalMeasurement = internal
+		}
 	}
 
 	// Get the centralized field mapping store
 	fieldMappingStore, err := e.store.FieldMappingStore(db)
 	if err != nil {
-		// Store doesn't exist yet, skip translation
-		return opt
+		// Store doesn't exist yet, skip field translation
+		return internalMeasurement, opt
 	}
 
 	// Translate the expression
-	opt.Expr = e.translateExpr(opt.Expr, measurement, fieldMappingStore)
+	opt.Expr = e.translateExpr(opt.Expr, internalMeasurement, fieldMappingStore)
 
 	// Translate auxiliary fields
 	for i, aux := range opt.Aux {
-		if internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, aux.Val); isActive {
+		if internalName, isActive := fieldMappingStore.GetInternalFieldName(internalMeasurement, aux.Val); isActive {
 			opt.Aux[i].Val = internalName
 		}
 	}
 
 	// Translate WHERE clause condition
-	opt.Condition = e.translateExpr(opt.Condition, measurement, fieldMappingStore)
+	opt.Condition = e.translateExpr(opt.Condition, internalMeasurement, fieldMappingStore)
 
-	return opt
+	return internalMeasurement, opt
 }
 
 // translateExpr translates field names in an expression from user-facing to internal names

@@ -57,20 +57,3 @@ message FieldMappingMeasurement {
 	bytes Name = 1;                            // Measurement name
 	repeated FieldMapping Mappings = 2;        // Field mappings for this measurement
 }
-
-enum MeasurementMappingState {
-  MEASUREMENT_ACTIVE = 0;
-  MEASUREMENT_DELETED = 1;
-  MEASUREMENT_RENAMED = 2;
-}
-
-message MeasurementMapping {
-  string UserName = 1;
-  string InternalName = 2;
-  int64 Version = 3;
-  MeasurementMappingState State = 4;
-}
-
-message MeasurementMappingSet {
-  repeated MeasurementMapping Mappings = 1;
-}

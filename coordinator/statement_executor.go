@@ -150,6 +150,11 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
 		}
 		err = e.executeRenameFieldStatement(stmt, ctx.Database)
+	case *influxql.RenameMeasurementStatement:
+		if ctx.ReadOnly {
+			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
+		}
+		err = e.executeRenameMeasurementStatement(stmt, ctx.Database)
 	case *influxql.ExplainStatement:
 		if stmt.Analyze {
 			rows, err = e.executeExplainAnalyzeStatement(stmt, ctx)
@@ -206,6 +211,8 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 		return e.executeShowTagValues(stmt, ctx)
 	case *influxql.ShowFieldMappingsStatement:
 		return e.executeShowFieldMappingsStatement(stmt, ctx)
+	case *influxql.ShowMeasurementMappingsStatement:
+		return e.executeShowMeasurementMappingsStatement(stmt, ctx)
 	case *influxql.ShowUsersStatement:
 		rows, err = e.executeShowUsersStatement(stmt)
 	case *influxql.SetPasswordUserStatement:
@@ -440,6 +447,34 @@ func (e *StatementExecutor) executeRenameFieldStatement(q *influxql.RenameFieldS
 	return e.RenameField(db, q.Measurement, q.OldName, q.NewName)
 }
 
+// executeRenameMeasurementStatement executes an ALTER MEASUREMENT RENAME TO statement
+func (e *StatementExecutor) executeRenameMeasurementStatement(q *influxql.RenameMeasurementStatement, database string) error {
+	db := q.Database
+	if db == "" {
+		db = database
+	}
+	return e.RenameMeasurement(db, q.OldName, q.NewName)
+}
+
+// RenameMeasurement renames a measurement in a database
+func (e *StatementExecutor) RenameMeasurement(database, oldName, newName string) error {
+	if dbi := e.MetaClient.Database(database); dbi == nil {
+		return query.ErrDatabaseNotFound(database)
+	}
+
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+	}
+
+	measMappingStore, err := store.MeasurementMappingStore(database)
+	if err != nil {
+		return err
+	}
+
+	return measMappingStore.RenameMeasurement(oldName, newName)
+}
+
 // Field operation methods
 
 // DropField soft deletes a field from a measurement
@@ -660,7 +695,7 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 		}
 
 		// Translate field names in the result row from internal names to user-facing names
-		if err := e.translateResultFieldNames(row, ctx.Database); err != nil {
+		if err := e.translateResultNames(row, ctx.Database); err != nil {
 			return err
 		}
 
@@ -806,23 +841,44 @@ func (e *StatementExecutor) executeShowMeasurementsStatement(q *influxql.ShowMea
 		})
 	}
 
+	// Translate internal measurement names to user-facing names
+	var userFacingNames []string
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		if measMappingStore, err := store.MeasurementMappingStore(q.Database); err == nil {
+			// Convert byte slices to strings
+			internalNames := make([]string, len(names))
+			for i, name := range names {
+				internalNames[i] = string(name)
+			}
+
+			userFacingNames = measMappingStore.GetUserMeasurementNames(internalNames)
+		}
+	}
+
+	if userFacingNames == nil {
+		userFacingNames = make([]string, len(names))
+		for i, name := range names {
+			userFacingNames[i] = string(name)
+		}
+	}
+
 	if q.Offset > 0 {
-		if q.Offset >= len(names) {
-			names = nil
+		if q.Offset >= len(userFacingNames) {
+			userFacingNames = nil
 		} else {
-			names = names[q.Offset:]
+			userFacingNames = userFacingNames[q.Offset:]
 		}
 	}
 
 	if q.Limit > 0 {
-		if q.Limit < len(names) {
-			names = names[:q.Limit]
+		if q.Limit < len(userFacingNames) {
+			userFacingNames = userFacingNames[:q.Limit]
 		}
 	}
 
-	values := make([][]interface{}, len(names))
-	for i, name := range names {
-		values[i] = []interface{}{string(name)}
+	values := make([][]interface{}, len(userFacingNames))
+	for i, name := range userFacingNames {
+		values[i] = []interface{}{name}
 	}
 
 	if len(values) == 0 {
@@ -1467,36 +1523,55 @@ type LocalTSDBStore struct {
 	*tsdb.Store
 }
 
-// translateResultFieldNames translates internal field names in the result row to user-facing names
-func (e *StatementExecutor) translateResultFieldNames(row *models.Row, database string) error {
-	if row == nil || len(row.Columns) == 0 {
+// translateResultNames translates internal measurement and field names in the result row to user-facing names
+func (e *StatementExecutor) translateResultNames(row *models.Row, database string) error {
+	if row == nil {
 		return nil
 	}
 
-	// Get the measurement name from the row
-	measurementName := row.Name
-	if measurementName == "" {
-		return nil
-	}
-
-	// Cast TSDBStore to get the centralized field mapping store
+	// Cast TSDBStore
 	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
-		// If not a *tsdb.Store, we can't access field mappings
 		return nil
 	}
 
-	// Get the centralized field mapping store
+	// 1. Translate Measurement Name
+	if row.Name != "" {
+		if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
+			// For a result row, the name is likely already translated because it was parsed from AST user input!
+			// Actually, if a query uses a regex, the row.Name returned by engine might be the internal name.
+			// However, in InfluxDB, the row name typically matches the user query.
+			// Let's assume the row.Name could be an internal name and try to map it back to a user name.
+			// Wait, the reverse mapping: we have internal name, need user name.
+			// GetUserMeasurementNames handles this deduplication and reverse mapping.
+			userNames := measMappingStore.GetUserMeasurementNames([]string{row.Name})
+			if len(userNames) > 0 {
+				row.Name = userNames[0]
+			}
+		}
+	}
+
+	if len(row.Columns) == 0 {
+		return nil
+	}
+
+	// Get the internal measurement name (we need this to look up fields)
+	// Since we might have just translated row.Name, we need to know the true internal name.
+	internalMeasurement := row.Name
+	if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
+		if internal, isActive := measMappingStore.GetInternalMeasurementName(row.Name); isActive {
+			internalMeasurement = internal
+		}
+	}
+
+	// 2. Translate Field Names
 	fieldMappingStore, err := store.FieldMappingStore(database)
 	if err != nil {
-		// Field mapping store doesn't exist yet, skip translation
 		return nil
 	}
 
-	// Get mappings once
-	mappings := fieldMappingStore.GetAllMappings(measurementName)
+	mappings := fieldMappingStore.GetAllMappings(internalMeasurement)
 
-	// Build map of internal name -> (userName, state)
 	internalToMapping := make(map[string]struct {
 		userName string
 		state    tsdb.FieldMappingState
@@ -1508,43 +1583,34 @@ func (e *StatementExecutor) translateResultFieldNames(row *models.Row, database 
 		}{m.UserName, m.State}
 	}
 
-	// Filter and translate columns - only include ACTIVE fields
 	translatedColumns := make([]string, 0, len(row.Columns))
 	columnIndices := make([]int, 0, len(row.Columns))
 
 	for i, colName := range row.Columns {
 		if colName == "time" {
-			// Time column doesn't need translation
 			translatedColumns = append(translatedColumns, colName)
 			columnIndices = append(columnIndices, i)
 		} else {
-			// Check if this internal name has a mapping
 			if mapping, exists := internalToMapping[colName]; exists {
-				// Only include ACTIVE fields
 				if mapping.state == tsdb.FieldMappingState_ACTIVE {
 					translatedColumns = append(translatedColumns, mapping.userName)
 					columnIndices = append(columnIndices, i)
 				}
-				// Skip DELETED and RENAMED fields
 			} else {
-				// No mapping - field exists but has no explicit mapping
-				// This is an unversioned field, include it
 				translatedColumns = append(translatedColumns, colName)
 				columnIndices = append(columnIndices, i)
 			}
 		}
 	}
 
-	// Update row with filtered columns
 	row.Columns = translatedColumns
 
-	// Filter values to match filtered columns
 	if len(columnIndices) < len(row.Values) && len(row.Values) > 0 {
 		translatedValues := make([][]interface{}, len(row.Values))
-		for i, row := range row.Values {
+		for i, vRow := range row.Values {
 			filteredRow := make([]interface{}, len(columnIndices))
 			for j, idx := range columnIndices {
-				filteredRow[j] = row[idx]
+				filteredRow[j] = vRow[idx]
 			}
 			translatedValues[i] = filteredRow
 		}
@@ -1640,6 +1706,68 @@ func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.Sho
 
 	row := &models.Row{
 		Name:    "field_mappings",
+		Columns: columns,
+		Values:  values,
+	}
+
+	return ctx.Send(&query.Result{
+		Series: []*models.Row{row},
+	})
+}
+
+// executeShowMeasurementMappingsStatement executes a SHOW MEASUREMENT MAPPINGS statement
+func (e *StatementExecutor) executeShowMeasurementMappingsStatement(stmt *influxql.ShowMeasurementMappingsStatement, ctx *query.ExecutionContext) error {
+	database := stmt.Database
+	if database == "" {
+		database = ctx.Database
+	}
+	if database == "" {
+		return fmt.Errorf("database name required")
+	}
+
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+	}
+
+	measMappingStore, err := store.MeasurementMappingStore(database)
+	if err != nil {
+		return err
+	}
+
+	mappings := measMappingStore.GetAllMappings()
+
+	// Sort mappings by user_name
+	sort.Slice(mappings, func(i, j int) bool {
+		return mappings[i].UserName < mappings[j].UserName
+	})
+
+	columns := []string{"user_name", "internal_name", "state"}
+	values := make([][]interface{}, 0, len(mappings))
+
+	for _, m := range mappings {
+		if m.State == tsdb.MeasurementMappingState_MEASUREMENT_RENAMED {
+			continue
+		}
+
+		stateStr := "ACTIVE"
+		var userName interface{}
+		if m.State == tsdb.MeasurementMappingState_MEASUREMENT_DELETED {
+			stateStr = "DELETED"
+			userName = nil // null for deleted fields
+		} else {
+			userName = m.UserName
+		}
+
+		values = append(values, []interface{}{
+			userName,
+			m.InternalName,
+			stateStr,
+		})
+	}
+
+	row := &models.Row{
+		Name:    "measurement_mappings",
 		Columns: columns,
 		Values:  values,
 	}

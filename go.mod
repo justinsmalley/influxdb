@@ -41,7 +41,7 @@ require (
 	golang.org/x/text v0.3.3
 	golang.org/x/time v0.0.0-20190308202827-9d24e82272b4
 	google.golang.org/grpc v1.26.0
-	google.golang.org/protobuf v1.28.1
+	google.golang.org/protobuf v1.28.1 // indirect
 )
 
 require (
@@ -60,3 +60,5 @@ require (
 	github.com/willf/bitset v1.1.3 // indirect
 	gonum.org/v1/gonum v0.6.0 // indirect
 )
+
+replace google.golang.org/protobuf => google.golang.org/protobuf v1.28.1

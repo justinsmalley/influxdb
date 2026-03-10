@@ -657,9 +657,9 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		j++
 
 		// Translate field names using field mappings
-		translatedPoint, err := s.translateFieldNames(points[i])
+		translatedPoint, err := s.translateNames(points[i])
 		if err != nil {
-			return nil, nil, fmt.Errorf("field name translation failed: %v", err)
+			return nil, nil, fmt.Errorf("name translation failed: %v", err)
 		}
 		points[j-1] = translatedPoint
 
@@ -701,39 +701,54 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 	return points[:j], fieldsToCreate, err
 }
 
-// translateFieldNames translates user-facing field names to internal field names using field mappings.
-func (s *Shard) translateFieldNames(point models.Point) (models.Point, error) {
-	// Get the centralized field mapping store
+// translateNames translates user-facing measurement and field names to internal names using mapping stores.
+func (s *Shard) translateNames(point models.Point) (models.Point, error) {
 	if s.store == nil {
 		// No store reference - skip translation
 		return point, nil
 	}
 
+	measurement := string(point.Name())
+	needsMeasurementTranslation := false
+	internalMeasurement := measurement
+
+	// Translate measurement name
+	measMappingStore, err := s.store.MeasurementMappingStore(s.database)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get measurement mapping store: %w", err)
+	}
+
+	if internalName, isActive := measMappingStore.GetInternalMeasurementName(measurement); !isActive {
+		// Measurement mapping exists but is not active
+		internalName, err = measMappingStore.CreateMeasurementMapping(measurement)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create measurement mapping for %s: %w", measurement, err)
+		}
+		internalMeasurement = internalName
+		needsMeasurementTranslation = true
+	} else if internalName != measurement {
+		internalMeasurement = internalName
+		needsMeasurementTranslation = true
+	}
+
+	// Translate field names
 	fieldMappingStore, err := s.store.FieldMappingStore(s.database)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get field mapping store: %w", err)
 	}
 
-	// Get the original fields
 	fields, err := point.Fields()
 	if err != nil {
 		return nil, err
 	}
 
-	measurement := string(point.Name())
-
-	// Check if any translation is needed
-	needsTranslation := false
+	needsFieldTranslation := false
 	translatedFields := make(models.Fields, len(fields))
 
 	for fieldName, value := range fields {
-		// Get internal field name from centralized store
-		internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, fieldName)
+		internalName, isActive := fieldMappingStore.GetInternalFieldName(internalMeasurement, fieldName)
 		if !isActive {
-			// Field mapping exists but is not active (renamed/deleted)
-			// Create a new field mapping for this user name
-			var err error
-			internalName, err = fieldMappingStore.CreateFieldMapping(measurement, fieldName)
+			internalName, err = fieldMappingStore.CreateFieldMapping(internalMeasurement, fieldName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create field mapping for %s: %w", fieldName, err)
 			}
@@ -741,20 +756,17 @@ func (s *Shard) translateFieldNames(point models.Point) (models.Point, error) {
 
 		translatedFields[internalName] = value
 
-		// Check if translation was needed
 		if internalName != fieldName {
-			needsTranslation = true
+			needsFieldTranslation = true
 		}
 	}
 
-	// If no translation needed, return original point
-	if !needsTranslation {
+	if !needsMeasurementTranslation && !needsFieldTranslation {
 		return point, nil
 	}
 
-	// Create new point with translated field names
 	newPoint, err := models.NewPoint(
-		string(point.Name()),
+		internalMeasurement,
 		point.Tags(),
 		translatedFields,
 		point.Time(),
@@ -993,15 +1005,25 @@ func (s *Shard) FieldDimensions(measurements []string) (fields map[string]influx
 			// Unknown system source so default to looking for a measurement.
 		}
 
+		// Map to internal name
+		internalName := name
+		if s.store != nil && s.database != "" {
+			if measMappingStore, err := s.store.MeasurementMappingStore(s.database); err == nil {
+				if internal, isActive := measMappingStore.GetInternalMeasurementName(name); isActive {
+					internalName = internal
+				}
+			}
+		}
+
 		// Retrieve measurement.
-		if exists, err := engine.MeasurementExists([]byte(name)); err != nil {
+		if exists, err := engine.MeasurementExists([]byte(internalName)); err != nil {
 			return nil, nil, err
 		} else if !exists {
 			continue
 		}
 
 		// Append fields and dimensions.
-		mf := engine.MeasurementFields([]byte(name))
+		mf := engine.MeasurementFields([]byte(internalName))
 		if mf != nil {
 			var fieldMappingStore *FieldMappingStore
 			if s.store != nil && s.database != "" {
@@ -1044,7 +1066,7 @@ func (s *Shard) FieldDimensions(measurements []string) (fields map[string]influx
 		}
 
 		indexSet := IndexSet{Indexes: []Index{index}, SeriesFile: s.sfile}
-		if err := indexSet.ForEachMeasurementTagKey([]byte(name), func(key []byte) error {
+		if err := indexSet.ForEachMeasurementTagKey([]byte(internalName), func(key []byte) error {
 			dimensions[string(key)] = struct{}{}
 			return nil
 		}); err != nil {
@@ -1087,17 +1109,28 @@ func (s *Shard) mapType(measurement, field string) (influxql.DataType, error) {
 	}
 	// Unknown system source so default to looking for a measurement.
 
-	if exists, _ := engine.MeasurementExists([]byte(measurement)); !exists {
+	internalMeasurement := measurement
+	if s.store != nil && s.database != "" {
+		if measMappingStore, err := s.store.MeasurementMappingStore(s.database); err == nil {
+			if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
+				internalMeasurement = internal
+			} else {
+				return influxql.Unknown, nil
+			}
+		}
+	}
+
+	if exists, _ := engine.MeasurementExists([]byte(internalMeasurement)); !exists {
 		return influxql.Unknown, nil
 	}
 
-	mf := engine.MeasurementFields([]byte(measurement))
+	mf := engine.MeasurementFields([]byte(internalMeasurement))
 	if mf != nil {
 		internalField := field
 		// Translate user-facing name to internal name
 		if s.store != nil && s.database != "" {
 			if fieldMappingStore, err := s.store.FieldMappingStore(s.database); err == nil {
-				if internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, field); isActive {
+				if internalName, isActive := fieldMappingStore.GetInternalFieldName(internalMeasurement, field); isActive {
 					internalField = internalName
 				} else {
 					// Field exists but is not active (e.g. deleted)
@@ -1112,7 +1145,7 @@ func (s *Shard) mapType(measurement, field string) (influxql.DataType, error) {
 		}
 	}
 
-	if exists, _ := engine.HasTagKey([]byte(measurement), []byte(field)); exists {
+	if exists, _ := engine.HasTagKey([]byte(internalMeasurement), []byte(field)); exists {
 		return influxql.Tag, nil
 	}
 
