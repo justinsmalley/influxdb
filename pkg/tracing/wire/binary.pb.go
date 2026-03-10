@@ -2,16 +2,18 @@
 // source: binary.proto
 
 /*
-	Package wire is a generated protocol buffer package.
+Package wire is a generated protocol buffer package.
 
-	It is generated from these files:
-		binary.proto
+It is generated from these files:
 
-	It has these top-level messages:
-		SpanContext
-		Span
-		Trace
-		Field
+	binary.proto
+
+It has these top-level messages:
+
+	SpanContext
+	Span
+	Trace
+	Field
 */
 package wire
 

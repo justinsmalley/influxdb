@@ -2,13 +2,15 @@
 // source: source.proto
 
 /*
-	Package storage is a generated protocol buffer package.
+Package storage is a generated protocol buffer package.
 
-	It is generated from these files:
-		source.proto
+It is generated from these files:
 
-	It has these top-level messages:
-		ReadSource
+	source.proto
+
+It has these top-level messages:
+
+	ReadSource
 */
 package storage
 

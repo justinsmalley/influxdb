@@ -8,7 +8,7 @@ func TestFieldManager_ParseFieldCommand(t *testing.T) {
 	// Create a mock statement executor for testing
 	executor := &StatementExecutor{}
 	fm := NewFieldManager(executor)
-	
+
 	tests := []struct {
 		name        string
 		database    string
@@ -76,7 +76,7 @@ func TestFieldManager_ParseFieldCommand(t *testing.T) {
 			expectError: true,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := fm.ParseFieldCommand(tt.database, tt.command)
@@ -93,7 +93,7 @@ func TestFieldManager_ParseFieldCommand(t *testing.T) {
 func TestFieldManager_DropField(t *testing.T) {
 	executor := &StatementExecutor{}
 	fm := NewFieldManager(executor)
-	
+
 	tests := []struct {
 		name        string
 		database    string
@@ -130,7 +130,7 @@ func TestFieldManager_DropField(t *testing.T) {
 			expectError: true,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := fm.DropField(tt.database, tt.measurement, tt.fieldName)
@@ -147,7 +147,7 @@ func TestFieldManager_DropField(t *testing.T) {
 func TestFieldManager_RenameField(t *testing.T) {
 	executor := &StatementExecutor{}
 	fm := NewFieldManager(executor)
-	
+
 	tests := []struct {
 		name        string
 		database    string
@@ -205,7 +205,7 @@ func TestFieldManager_RenameField(t *testing.T) {
 			expectError: true,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := fm.RenameField(tt.database, tt.measurement, tt.oldName, tt.newName)

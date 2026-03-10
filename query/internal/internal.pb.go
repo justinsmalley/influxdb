@@ -5,9 +5,11 @@
 Package query is a generated protocol buffer package.
 
 It is generated from these files:
+
 	internal/internal.proto
 
 It has these top-level messages:
+
 	Point
 	Aux
 	IteratorOptions

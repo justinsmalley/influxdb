@@ -39,7 +39,7 @@ func TestValidateFieldName(t *testing.T) {
 			fieldName:   "temp_温度_123",
 			expectError: false,
 		},
-		
+
 		// Empty and whitespace
 		{
 			name:        "empty string",
@@ -65,7 +65,7 @@ func TestValidateFieldName(t *testing.T) {
 			expectError: true,
 			errorMsg:    "field name cannot have leading or trailing whitespace",
 		},
-		
+
 		// Length validation
 		{
 			name:        "exceeds max length",
@@ -78,7 +78,7 @@ func TestValidateFieldName(t *testing.T) {
 			fieldName:   strings.Repeat("a", MaxFieldNameLength),
 			expectError: false,
 		},
-		
+
 		// Invalid UTF-8
 		{
 			name:        "invalid UTF-8 sequence",
@@ -86,7 +86,7 @@ func TestValidateFieldName(t *testing.T) {
 			expectError: true,
 			errorMsg:    "field name must be valid UTF-8",
 		},
-		
+
 		// Null bytes
 		{
 			name:        "contains null byte",
@@ -94,7 +94,7 @@ func TestValidateFieldName(t *testing.T) {
 			expectError: true,
 			errorMsg:    "field name cannot contain null bytes",
 		},
-		
+
 		// Internal delimiter
 		{
 			name:        "contains internal delimiter",
@@ -114,7 +114,7 @@ func TestValidateFieldName(t *testing.T) {
 			expectError: true,
 			errorMsg:    "field name cannot contain reserved pattern '#!~#'",
 		},
-		
+
 		// Version suffix pattern
 		{
 			name:        "ends with .v1",
@@ -144,7 +144,7 @@ func TestValidateFieldName(t *testing.T) {
 			fieldName:   "temperature.v",
 			expectError: false, // Regex requires digits after .v
 		},
-		
+
 		// Reserved names
 		{
 			name:        "reserved _name",
@@ -176,7 +176,7 @@ func TestValidateFieldName(t *testing.T) {
 			expectError: true,
 			errorMsg:    "field name 'time' is reserved",
 		},
-		
+
 		// Edge cases
 		{
 			name:        "single character",
@@ -208,14 +208,14 @@ func TestValidateFieldName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := ValidateFieldName(tt.fieldName)
-			
+
 			if tt.expectError {
 				if err == nil {
 					t.Errorf("ValidateFieldName(%q) expected error but got nil", tt.fieldName)
 					return
 				}
 				if tt.errorMsg != "" && !strings.Contains(err.Error(), tt.errorMsg) {
-					t.Errorf("ValidateFieldName(%q) expected error containing '%s' but got '%s'", 
+					t.Errorf("ValidateFieldName(%q) expected error containing '%s' but got '%s'",
 						tt.fieldName, tt.errorMsg, err.Error())
 				}
 			} else {
@@ -230,14 +230,14 @@ func TestValidateFieldName(t *testing.T) {
 func TestValidateFieldName_UTF8EdgeCases(t *testing.T) {
 	// Test various UTF-8 sequences
 	validUTF8Tests := []string{
-		"café",           // Latin with accent
-		"温度",            // Chinese characters
-		"температура",    // Cyrillic
-		"🌡️",             // Emoji
-		"αβγ",            // Greek
+		"café",            // Latin with accent
+		"温度",              // Chinese characters
+		"температура",     // Cyrillic
+		"🌡️",              // Emoji
+		"αβγ",             // Greek
 		"температура_123", // Mixed scripts
 	}
-	
+
 	for _, fieldName := range validUTF8Tests {
 		t.Run("valid_utf8_"+fieldName, func(t *testing.T) {
 			if !utf8.ValidString(fieldName) {
@@ -256,14 +256,14 @@ func TestValidateFieldName_RegexPatterns(t *testing.T) {
 	// Test that our regex correctly identifies versioning patterns
 	versionPatterns := []string{
 		"temp.v1",
-		"temp.v2", 
+		"temp.v2",
 		"temp.v10",
 		"temp.v999",
 		"temperature.v1",
 		"a.v1",
 		"_.v1",
 	}
-	
+
 	for _, pattern := range versionPatterns {
 		t.Run("version_pattern_"+pattern, func(t *testing.T) {
 			err := ValidateFieldName(pattern)
@@ -275,16 +275,16 @@ func TestValidateFieldName_RegexPatterns(t *testing.T) {
 			}
 		})
 	}
-	
+
 	// Test that similar patterns are NOT caught
 	nonVersionPatterns := []string{
-		"temp.v",      // No number
-		"temp.v1a",    // Letter after number
-		"temp.v1.2",   // Additional dot
-		"tempv1",      // No dot
-		"temp.1",      // No 'v'
+		"temp.v",    // No number
+		"temp.v1a",  // Letter after number
+		"temp.v1.2", // Additional dot
+		"tempv1",    // No dot
+		"temp.1",    // No 'v'
 	}
-	
+
 	for _, pattern := range nonVersionPatterns {
 		t.Run("non_version_pattern_"+pattern, func(t *testing.T) {
 			err := ValidateFieldName(pattern)
@@ -300,20 +300,20 @@ func TestValidateFieldName_Constants(t *testing.T) {
 	if MaxFieldNameLength <= 0 {
 		t.Errorf("MaxFieldNameLength should be positive, got %d", MaxFieldNameLength)
 	}
-	
+
 	if MaxFieldNameLength > 1000 {
 		t.Errorf("MaxFieldNameLength seems too large: %d", MaxFieldNameLength)
 	}
-	
+
 	if InternalDelimiter == "" {
 		t.Errorf("InternalDelimiter should not be empty")
 	}
-	
+
 	// Test that reserved names map is populated
 	if len(reservedFieldNames) == 0 {
 		t.Errorf("reservedFieldNames map should not be empty")
 	}
-	
+
 	// Test that all reserved names are actually reserved
 	for reservedName := range reservedFieldNames {
 		err := ValidateFieldName(reservedName)

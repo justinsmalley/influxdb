@@ -3,21 +3,23 @@
 // DO NOT EDIT!
 
 /*
-	Package remote is a generated protocol buffer package.
+Package remote is a generated protocol buffer package.
 
-	It is generated from these files:
-		remote.proto
+It is generated from these files:
 
-	It has these top-level messages:
-		Sample
-		LabelPair
-		TimeSeries
-		WriteRequest
-		ReadRequest
-		ReadResponse
-		Query
-		LabelMatcher
-		QueryResult
+	remote.proto
+
+It has these top-level messages:
+
+	Sample
+	LabelPair
+	TimeSeries
+	WriteRequest
+	ReadRequest
+	ReadResponse
+	Query
+	LabelMatcher
+	QueryResult
 */
 package remote
 

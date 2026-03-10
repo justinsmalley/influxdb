@@ -6,9 +6,11 @@
 Package backup_util is a generated protocol buffer package.
 
 It is generated from these files:
+
 	internal/data.proto
 
 It has these top-level messages:
+
 	PortableData
 */
 package backup_util
