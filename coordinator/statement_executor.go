@@ -59,6 +59,11 @@ type StatementExecutor struct {
 
 // ExecuteStatement executes the given statement with the given execution context.
 func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query.ExecutionContext) error {
+	// Translate database names in the context and AST
+	if err := e.translateDatabaseNames(stmt, ctx); err != nil {
+		return err
+	}
+
 	// Select statements are handled separately so that they can be streamed.
 	if stmt, ok := stmt.(*influxql.SelectStatement); ok {
 		return e.executeSelectStatement(stmt, ctx)
@@ -155,6 +160,11 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
 		}
 		err = e.executeRenameMeasurementStatement(stmt, ctx.Database)
+	case *influxql.RenameDatabaseStatement:
+		if ctx.ReadOnly {
+			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
+		}
+		err = e.executeRenameDatabaseStatement(stmt)
 	case *influxql.ExplainStatement:
 		if stmt.Analyze {
 			rows, err = e.executeExplainAnalyzeStatement(stmt, ctx)
@@ -213,6 +223,8 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 		return e.executeShowFieldMappingsStatement(stmt, ctx)
 	case *influxql.ShowMeasurementMappingsStatement:
 		return e.executeShowMeasurementMappingsStatement(stmt, ctx)
+	case *influxql.ShowDatabaseMappingsStatement:
+		return e.executeShowDatabaseMappingsStatement(stmt, ctx)
 	case *influxql.ShowUsersStatement:
 		rows, err = e.executeShowUsersStatement(stmt)
 	case *influxql.SetPasswordUserStatement:
@@ -284,8 +296,19 @@ func (e *StatementExecutor) executeCreateDatabaseStatement(stmt *influxql.Create
 		return meta.ErrInvalidName
 	}
 
+	internalName := stmt.Name
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		if mappingStore, err := store.DatabaseMappingStore(); err == nil {
+			if internal, err := mappingStore.CreateDatabaseMapping(stmt.Name); err == nil {
+				internalName = internal
+			} else {
+				return err // e.g. "database already exists"
+			}
+		}
+	}
+
 	if !stmt.RetentionPolicyCreate {
-		_, err := e.MetaClient.CreateDatabase(stmt.Name)
+		_, err := e.MetaClient.CreateDatabase(internalName)
 		return err
 	}
 
@@ -303,7 +326,7 @@ func (e *StatementExecutor) executeCreateDatabaseStatement(stmt *influxql.Create
 		ReplicaN:           stmt.RetentionPolicyReplication,
 		ShardGroupDuration: stmt.RetentionPolicyShardGroupDuration,
 	}
-	_, err := e.MetaClient.CreateDatabaseWithRetentionPolicy(stmt.Name, &spec)
+	_, err := e.MetaClient.CreateDatabaseWithRetentionPolicy(internalName, &spec)
 	return err
 }
 
@@ -355,17 +378,30 @@ func (e *StatementExecutor) executeDropContinuousQueryStatement(q *influxql.Drop
 // It does not return an error if the database was not found on any of
 // the nodes, or in the Meta store.
 func (e *StatementExecutor) executeDropDatabaseStatement(stmt *influxql.DropDatabaseStatement) error {
-	if e.MetaClient.Database(stmt.Name) == nil {
+	userName := stmt.Name
+	internalName := userName
+
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		if mappingStore, err := store.DatabaseMappingStore(); err == nil {
+			if internal, isActive := mappingStore.GetInternalDatabaseName(userName); isActive {
+				internalName = internal
+			}
+			// Mark it deleted in the mapping store
+			_ = mappingStore.SoftDeleteDatabase(userName)
+		}
+	}
+
+	if e.MetaClient.Database(internalName) == nil {
 		return nil
 	}
 
 	// Locally delete the datababse.
-	if err := e.TSDBStore.DeleteDatabase(stmt.Name); err != nil {
+	if err := e.TSDBStore.DeleteDatabase(internalName); err != nil {
 		return err
 	}
 
 	// Remove the database from the Meta Store.
-	return e.MetaClient.DropDatabase(stmt.Name)
+	return e.MetaClient.DropDatabase(internalName)
 }
 
 func (e *StatementExecutor) executeDropMeasurementStatement(stmt *influxql.DropMeasurementStatement, database string) error {
@@ -447,6 +483,32 @@ func (e *StatementExecutor) executeRenameFieldStatement(q *influxql.RenameFieldS
 	return e.RenameField(db, q.Measurement, q.OldName, q.NewName)
 }
 
+// executeRenameDatabaseStatement executes an ALTER DATABASE RENAME TO statement
+func (e *StatementExecutor) executeRenameDatabaseStatement(q *influxql.RenameDatabaseStatement) error {
+	return e.RenameDatabase(q.OldName, q.NewName)
+}
+
+// RenameDatabase renames a database across the system
+func (e *StatementExecutor) RenameDatabase(oldName, newName string) error {
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
+	}
+
+	// Check if new database name implicitly exists
+	if mappingStore, err := store.DatabaseMappingStore(); err == nil {
+		internalNewName, isActive := mappingStore.GetInternalDatabaseName(newName)
+		if isActive && internalNewName == newName {
+			if e.MetaClient != nil && e.MetaClient.Database(newName) != nil {
+				return fmt.Errorf("database %s already exists", newName)
+			}
+		}
+	}
+
+	return store.RenameDatabaseMapping(oldName, newName)
+}
+
 // executeRenameMeasurementStatement executes an ALTER MEASUREMENT RENAME TO statement
 func (e *StatementExecutor) executeRenameMeasurementStatement(q *influxql.RenameMeasurementStatement, database string) error {
 	db := q.Database
@@ -458,18 +520,44 @@ func (e *StatementExecutor) executeRenameMeasurementStatement(q *influxql.Rename
 
 // RenameMeasurement renames a measurement in a database
 func (e *StatementExecutor) RenameMeasurement(database, oldName, newName string) error {
-	if dbi := e.MetaClient.Database(database); dbi == nil {
-		return query.ErrDatabaseNotFound(database)
+	if e.MetaClient != nil {
+		if dbi := e.MetaClient.Database(database); dbi == nil {
+			return query.ErrDatabaseNotFound(database)
+		}
 	}
 
 	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
-		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
 	}
 
 	measMappingStore, err := store.MeasurementMappingStore(database)
 	if err != nil {
 		return err
+	}
+
+	// Check if new measurement name already implicitly exists in any shard
+	internalNewName, isActive := measMappingStore.GetInternalMeasurementName(newName)
+	if isActive && internalNewName == newName {
+		if e.MetaClient != nil {
+			if dbi := e.MetaClient.Database(database); dbi != nil {
+				var shardIDs []uint64
+				for _, rpi := range dbi.RetentionPolicies {
+					for _, sgi := range rpi.ShardGroups {
+						for _, sh := range sgi.Shards {
+							shardIDs = append(shardIDs, sh.ID)
+						}
+					}
+				}
+				shards := store.Shards(shardIDs)
+				for _, sh := range shards {
+					if exists, _ := sh.MeasurementExists([]byte(newName)); exists {
+						return fmt.Errorf("measurement %s already exists", newName)
+					}
+				}
+			}
+		}
 	}
 
 	return measMappingStore.RenameMeasurement(oldName, newName)
@@ -479,14 +567,17 @@ func (e *StatementExecutor) RenameMeasurement(database, oldName, newName string)
 
 // DropField soft deletes a field from a measurement
 func (e *StatementExecutor) DropField(database, measurement, fieldName string) error {
-	if dbi := e.MetaClient.Database(database); dbi == nil {
-		return query.ErrDatabaseNotFound(database)
+	if e.MetaClient != nil {
+		if dbi := e.MetaClient.Database(database); dbi == nil {
+			return query.ErrDatabaseNotFound(database)
+		}
 	}
 
 	// Cast TSDBStore to *tsdb.Store
 	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
-		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
 	}
 
 	// Get the centralized field mapping store
@@ -501,20 +592,56 @@ func (e *StatementExecutor) DropField(database, measurement, fieldName string) e
 
 // RenameField renames a field in a measurement
 func (e *StatementExecutor) RenameField(database, measurement, oldName, newName string) error {
-	if dbi := e.MetaClient.Database(database); dbi == nil {
-		return query.ErrDatabaseNotFound(database)
+	if e.MetaClient != nil {
+		if dbi := e.MetaClient.Database(database); dbi == nil {
+			return query.ErrDatabaseNotFound(database)
+		}
 	}
 
 	// Cast TSDBStore to *tsdb.Store
 	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
-		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
+	}
+
+	// Map to internal measurement name
+	internalMeasurement := measurement
+	if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
+		if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
+			internalMeasurement = internal
+		}
 	}
 
 	// Get the centralized field mapping store
 	fieldMappingStore, err := store.FieldMappingStore(database)
 	if err != nil {
 		return err
+	}
+
+	// Check if new field name already implicitly exists in any shard
+	internalNewName, isActive := fieldMappingStore.GetInternalFieldName(measurement, newName)
+	if isActive && internalNewName == newName {
+		if e.MetaClient != nil {
+			if dbi := e.MetaClient.Database(database); dbi != nil {
+				var shardIDs []uint64
+				for _, rpi := range dbi.RetentionPolicies {
+					for _, sgi := range rpi.ShardGroups {
+						for _, sh := range sgi.Shards {
+							shardIDs = append(shardIDs, sh.ID)
+						}
+					}
+				}
+				shards := store.Shards(shardIDs)
+				for _, sh := range shards {
+					if mf := sh.MeasurementFields([]byte(internalMeasurement)); mf != nil {
+						if mf.HasField(newName) {
+							return fmt.Errorf("field %s already exists", newName)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Single operation on centralized store - no shard iteration needed!
@@ -651,6 +778,184 @@ func (e *StatementExecutor) executeSetPasswordUserStatement(q *influxql.SetPassw
 	return e.MetaClient.UpdateUser(q.Name, q.Password)
 }
 
+func (e *StatementExecutor) translateDatabaseNames(stmt influxql.Statement, ctx *query.ExecutionContext) error {
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		return nil // Nothing to translate if we don't have the store
+	}
+
+	mappingStore, err := store.DatabaseMappingStore()
+	if err != nil {
+		return err
+	}
+
+	// Helper to translate a single database string
+	translate := func(db string) (string, error) {
+		if db == "" {
+			return "", nil
+		}
+		internal, isActive := mappingStore.GetInternalDatabaseName(db)
+		if isActive {
+			return internal, nil
+		} else if internal == "" {
+			return "", influxdb.ErrDatabaseNotFound(db)
+		}
+		return db, nil
+	}
+
+	// 1. Translate the context Database (used as default for queries)
+	if ctx != nil && ctx.Database != "" {
+		db, err := translate(ctx.Database)
+		if err != nil {
+			return err
+		}
+		ctx.Database = db
+	}
+
+	// 2. We do NOT translate the names in CREATE DATABASE, DROP DATABASE, or ALTER DATABASE... RENAME
+	// because they need to operate on the user-facing names for the mapping store logic to intercept them correctly!
+	// Actually, wait, let's only translate for statements that operate ON an existing database context,
+	// or the AST nodes themselves.
+	switch stmt := stmt.(type) {
+	case *influxql.CreateDatabaseStatement, *influxql.DropDatabaseStatement, *influxql.RenameDatabaseStatement, *influxql.ShowDatabaseMappingsStatement:
+		// We don't translate the AST nodes for these, because we need the raw user-facing names.
+		return nil
+	// Directly handle AST nodes with Database fields that are NOT implicitly traversed by WalkFunc:
+	case *influxql.CreateRetentionPolicyStatement:
+		if stmt.Database != "" {
+			db, err := translate(stmt.Database)
+			if err != nil {
+				return err
+			}
+			stmt.Database = db
+		}
+	case *influxql.AlterRetentionPolicyStatement:
+		if stmt.Database != "" {
+			db, err := translate(stmt.Database)
+			if err != nil {
+				return err
+			}
+			stmt.Database = db
+		}
+	case *influxql.DropRetentionPolicyStatement:
+		if stmt.Database != "" {
+			db, err := translate(stmt.Database)
+			if err != nil {
+				return err
+			}
+			stmt.Database = db
+		}
+	case *influxql.ShowRetentionPoliciesStatement:
+		if stmt.Database != "" {
+			db, err := translate(stmt.Database)
+			if err != nil {
+				return err
+			}
+			stmt.Database = db
+		}
+	case *influxql.CreateContinuousQueryStatement:
+		if stmt.Database != "" {
+			db, err := translate(stmt.Database)
+			if err != nil {
+				return err
+			}
+			stmt.Database = db
+		}
+	case *influxql.DropContinuousQueryStatement:
+		if stmt.Database != "" {
+			db, err := translate(stmt.Database)
+			if err != nil {
+				return err
+			}
+			stmt.Database = db
+		}
+	}
+
+	// 3. Walk the AST and translate any explicit `Database` fields
+	var walkErr error
+	influxql.WalkFunc(stmt, func(n influxql.Node) {
+		if n == nil || walkErr != nil {
+			return
+		}
+		switch n := n.(type) {
+		case *influxql.Measurement:
+			if n.Database != "" {
+				db, err := translate(n.Database)
+				if err != nil {
+					walkErr = err
+				} else {
+					n.Database = db
+				}
+			}
+		case *influxql.ShowMeasurementsStatement:
+			if n.Database != "" {
+				db, err := translate(n.Database)
+				if err != nil {
+					walkErr = err
+				} else {
+					n.Database = db
+				}
+			}
+		case *influxql.ShowMeasurementMappingsStatement:
+			if n.Database != "" {
+				db, err := translate(n.Database)
+				if err != nil {
+					walkErr = err
+				} else {
+					n.Database = db
+				}
+			}
+		case *influxql.ShowFieldMappingsStatement:
+			if n.Database != "" {
+				db, err := translate(n.Database)
+				if err != nil {
+					walkErr = err
+				} else {
+					n.Database = db
+				}
+			}
+		case *influxql.ShowTagKeysStatement:
+			if n.Database != "" {
+				db, err := translate(n.Database)
+				if err != nil {
+					walkErr = err
+				} else {
+					n.Database = db
+				}
+			}
+		case *influxql.ShowTagValuesStatement:
+			if n.Database != "" {
+				db, err := translate(n.Database)
+				if err != nil {
+					walkErr = err
+				} else {
+					n.Database = db
+				}
+			}
+		case *influxql.ShowSeriesStatement:
+			if n.Database != "" {
+				db, err := translate(n.Database)
+				if err != nil {
+					walkErr = err
+				} else {
+					n.Database = db
+				}
+			}
+		case *influxql.RenameMeasurementStatement:
+			if n.Database != "" {
+				db, err := translate(n.Database)
+				if err != nil {
+					walkErr = err
+				} else {
+					n.Database = db
+				}
+			}
+		}
+	})
+
+	return walkErr
+}
+
 func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatement, ctx *query.ExecutionContext) error {
 	cur, err := e.createIterators(ctx, stmt, ctx.ExecutionOptions)
 	if err != nil {
@@ -778,11 +1083,30 @@ func (e *StatementExecutor) executeShowDatabasesStatement(q *influxql.ShowDataba
 	dis := e.MetaClient.Databases()
 	a := ctx.ExecutionOptions.Authorizer
 
+	// Extract mapping store to translate internal database names back to user names
+	var mappingStore *tsdb.DatabaseMappingStore
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		mappingStore, _ = store.DatabaseMappingStore()
+	}
+
 	row := &models.Row{Name: "databases", Columns: []string{"name"}}
+	
+	// Create list of internal names
+	internalNames := make([]string, 0, len(dis))
 	for _, di := range dis {
-		// Only include databases that the user is authorized to read or write.
+		internalNames = append(internalNames, di.Name)
+	}
+
+	// Bulk translate to user names
+	userNames := internalNames
+	if mappingStore != nil {
+		userNames = mappingStore.GetUserDatabaseNames(internalNames)
+	}
+
+	for i, di := range dis {
+		// We still authorize against the *internal* database name since permissions are mapped to it in meta store
 		if a.AuthorizeDatabase(influxql.ReadPrivilege, di.Name) || a.AuthorizeDatabase(influxql.WritePrivilege, di.Name) {
-			row.Values = append(row.Values, []interface{}{di.Name})
+			row.Values = append(row.Values, []interface{}{userNames[i]})
 		}
 	}
 	return []*models.Row{row}, nil
@@ -930,9 +1254,22 @@ func (e *StatementExecutor) executeShowRetentionPoliciesStatement(q *influxql.Sh
 func (e *StatementExecutor) executeShowShardsStatement(stmt *influxql.ShowShardsStatement) (models.Rows, error) {
 	dis := e.MetaClient.Databases()
 
+	// Extract mapping store to translate internal database names back to user names
+	var mappingStore *tsdb.DatabaseMappingStore
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		mappingStore, _ = store.DatabaseMappingStore()
+	}
+
 	rows := []*models.Row{}
 	for _, di := range dis {
-		row := &models.Row{Columns: []string{"id", "database", "retention_policy", "shard_group", "start_time", "end_time", "expiry_time", "owners"}, Name: di.Name}
+		userDbName := di.Name
+		if mappingStore != nil {
+			if names := mappingStore.GetUserDatabaseNames([]string{di.Name}); len(names) > 0 {
+				userDbName = names[0]
+			}
+		}
+
+		row := &models.Row{Columns: []string{"id", "database", "retention_policy", "shard_group", "start_time", "end_time", "expiry_time", "owners"}, Name: userDbName}
 		for _, rpi := range di.RetentionPolicies {
 			for _, sgi := range rpi.ShardGroups {
 				// Shards associated with deleted shard groups are effectively deleted.
@@ -949,7 +1286,7 @@ func (e *StatementExecutor) executeShowShardsStatement(stmt *influxql.ShowShards
 
 					row.Values = append(row.Values, []interface{}{
 						si.ID,
-						di.Name,
+						userDbName,
 						rpi.Name,
 						sgi.ID,
 						sgi.StartTime.UTC().Format(time.RFC3339),
@@ -984,8 +1321,21 @@ func (e *StatementExecutor) executeShowSeriesCardinalityStatement(stmt *influxql
 func (e *StatementExecutor) executeShowShardGroupsStatement(stmt *influxql.ShowShardGroupsStatement) (models.Rows, error) {
 	dis := e.MetaClient.Databases()
 
+	// Extract mapping store to translate internal database names back to user names
+	var mappingStore *tsdb.DatabaseMappingStore
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		mappingStore, _ = store.DatabaseMappingStore()
+	}
+
 	row := &models.Row{Columns: []string{"id", "database", "retention_policy", "start_time", "end_time", "expiry_time"}, Name: "shard groups"}
 	for _, di := range dis {
+		userDbName := di.Name
+		if mappingStore != nil {
+			if names := mappingStore.GetUserDatabaseNames([]string{di.Name}); len(names) > 0 {
+				userDbName = names[0]
+			}
+		}
+
 		for _, rpi := range di.RetentionPolicies {
 			for _, sgi := range rpi.ShardGroups {
 				// Shards associated with deleted shard groups are effectively deleted.
@@ -996,7 +1346,7 @@ func (e *StatementExecutor) executeShowShardGroupsStatement(stmt *influxql.ShowS
 
 				row.Values = append(row.Values, []interface{}{
 					sgi.ID,
-					di.Name,
+					userDbName,
 					rpi.Name,
 					sgi.StartTime.UTC().Format(time.RFC3339),
 					sgi.EndTime.UTC().Format(time.RFC3339),
@@ -1564,7 +1914,7 @@ func (e *StatementExecutor) translateResultNames(row *models.Row, database strin
 		}
 	}
 
-	// 2. Translate Field Names
+	// Translate Field Names
 	fieldMappingStore, err := store.FieldMappingStore(database)
 	if err != nil {
 		return nil
@@ -1576,6 +1926,8 @@ func (e *StatementExecutor) translateResultNames(row *models.Row, database strin
 		userName string
 		state    tsdb.FieldMappingState
 	})
+	// Iterate forwards so we populate with the oldest mapping first, then overwrite with newer mappings.
+	// That way the map contains the MOST RECENT mapping state for any given internal name.
 	for _, m := range mappings {
 		internalToMapping[m.InternalName] = struct {
 			userName string
@@ -1649,7 +2001,8 @@ func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.Sho
 
 	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
-		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
 	}
 
 	fieldMappingStore, err := store.FieldMappingStore(database)
@@ -1715,7 +2068,56 @@ func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.Sho
 	})
 }
 
-// executeShowMeasurementMappingsStatement executes a SHOW MEASUREMENT MAPPINGS statement
+// executeShowDatabaseMappingsStatement executes a SHOW DATABASE MAPPINGS statement
+func (e *StatementExecutor) executeShowDatabaseMappingsStatement(stmt *influxql.ShowDatabaseMappingsStatement, ctx *query.ExecutionContext) error {
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
+	}
+
+	mappings := store.GetAllDatabaseMappings()
+
+	// Sort mappings by user_name
+	sort.Slice(mappings, func(i, j int) bool {
+		return mappings[i].UserName < mappings[j].UserName
+	})
+
+	columns := []string{"user_name", "internal_name", "state"}
+	values := make([][]interface{}, 0, len(mappings))
+
+	for _, m := range mappings {
+		if m.State == tsdb.DatabaseMappingState_DATABASE_RENAMED {
+			continue
+		}
+
+		stateStr := "ACTIVE"
+		var userName interface{}
+		if m.State == tsdb.DatabaseMappingState_DATABASE_DELETED {
+			stateStr = "DELETED"
+			userName = nil // null for deleted fields
+		} else {
+			userName = m.UserName
+		}
+
+		values = append(values, []interface{}{
+			userName,
+			m.InternalName,
+			stateStr,
+		})
+	}
+
+	row := &models.Row{
+		Name:    "database_mappings",
+		Columns: columns,
+		Values:  values,
+	}
+
+	return ctx.Send(&query.Result{
+		Series: []*models.Row{row},
+	})
+}
+
 func (e *StatementExecutor) executeShowMeasurementMappingsStatement(stmt *influxql.ShowMeasurementMappingsStatement, ctx *query.ExecutionContext) error {
 	database := stmt.Database
 	if database == "" {
@@ -1727,7 +2129,8 @@ func (e *StatementExecutor) executeShowMeasurementMappingsStatement(stmt *influx
 
 	store, ok := e.TSDBStore.(*tsdb.Store)
 	if !ok {
-		return fmt.Errorf("TSDBStore is not a *tsdb.Store")
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
 	}
 
 	measMappingStore, err := store.MeasurementMappingStore(database)

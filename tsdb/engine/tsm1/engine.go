@@ -2413,6 +2413,10 @@ func (e *Engine) translateNamesInOptions(measurement string, opt query.IteratorO
 	if measMappingStore, err := e.store.MeasurementMappingStore(db); err == nil {
 		if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
 			internalMeasurement = internal
+		} else if internal == "" {
+			// Measurement is explicitly inactive (renamed or deleted), so we must not use the original name
+			// as it might falsely match internal data. Setting it to empty ensures the engine finds nothing.
+			internalMeasurement = ""
 		}
 	}
 

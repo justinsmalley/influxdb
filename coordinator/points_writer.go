@@ -292,6 +292,17 @@ func (w *PointsWriter) WritePointsPrivileged(database, retentionPolicy string, c
 	atomic.AddInt64(&w.stats.WriteReq, 1)
 	atomic.AddInt64(&w.stats.PointWriteReq, int64(len(points)))
 
+	if store, ok := w.TSDBStore.(*tsdb.Store); ok {
+		if mappingStore, err := store.DatabaseMappingStore(); err == nil {
+			internal, isActive := mappingStore.GetInternalDatabaseName(database)
+			if isActive {
+				database = internal
+			} else if internal == "" {
+				return influxdb.ErrDatabaseNotFound(database) // Explicitly inactive
+			}
+		}
+	}
+
 	if retentionPolicy == "" {
 		db := w.MetaClient.Database(database)
 		if db == nil {

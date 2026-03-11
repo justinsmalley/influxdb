@@ -107,6 +107,9 @@ type Store struct {
 
 	measurementMappingStores map[string]*MeasurementMappingStore
 	measurementMappingMu     sync.RWMutex
+
+	databaseMappingStore *DatabaseMappingStore
+	databaseMappingMu    sync.RWMutex
 }
 
 // NewStore returns a new store with the given path and a default configuration.
@@ -2145,6 +2148,53 @@ func (s shardSet) ForEach(f func(ids *SeriesIDSet)) error {
 		f(idx.SeriesIDSet())
 	}
 	return nil
+}
+
+// DatabaseMappingStore returns the database mapping store (global)
+func (s *Store) DatabaseMappingStore() (*DatabaseMappingStore, error) {
+	s.databaseMappingMu.RLock()
+	store := s.databaseMappingStore
+	s.databaseMappingMu.RUnlock()
+
+	if store != nil {
+		return store, nil
+	}
+
+	// Create new store
+	s.databaseMappingMu.Lock()
+	defer s.databaseMappingMu.Unlock()
+
+	// Double-check
+	if s.databaseMappingStore != nil {
+		return s.databaseMappingStore, nil
+	}
+
+	mappingPath := filepath.Join(s.path, "database_mappings.idx")
+
+	store, err := NewDatabaseMappingStore(mappingPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database mapping store: %v", err)
+	}
+
+	s.databaseMappingStore = store
+	return store, nil
+}
+
+// RenameDatabaseMapping renames a database across the entire system
+func (s *Store) RenameDatabaseMapping(oldName, newName string) error {
+	store, err := s.DatabaseMappingStore()
+	if err != nil {
+		return err
+	}
+	return store.RenameDatabase(oldName, newName)
+}
+
+func (s *Store) GetAllDatabaseMappings() []*DatabaseMappingInfo {
+	store, err := s.DatabaseMappingStore()
+	if err != nil {
+		return nil
+	}
+	return store.GetAllMappings()
 }
 
 // MeasurementMappingStore returns the measurement mapping store for a database

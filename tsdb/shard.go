@@ -1011,6 +1011,10 @@ func (s *Shard) FieldDimensions(measurements []string) (fields map[string]influx
 			if measMappingStore, err := s.store.MeasurementMappingStore(s.database); err == nil {
 				if internal, isActive := measMappingStore.GetInternalMeasurementName(name); isActive {
 					internalName = internal
+				} else if internal == "" {
+					// Measurement mapping explicitly says this is inactive (e.g., renamed/deleted)
+					// So it effectively doesn't exist for querying.
+					continue
 				}
 			}
 		}

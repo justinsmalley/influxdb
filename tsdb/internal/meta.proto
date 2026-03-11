@@ -74,3 +74,20 @@ message MeasurementMapping {
 message MeasurementMappingSet {
   repeated MeasurementMapping Mappings = 1;
 }
+
+enum DatabaseMappingState {
+  DATABASE_ACTIVE = 0;
+  DATABASE_DELETED = 1;
+  DATABASE_RENAMED = 2;
+}
+
+message DatabaseMapping {
+  string UserName = 1;
+  string InternalName = 2;
+  int64 Version = 3;
+  DatabaseMappingState State = 4;
+}
+
+message DatabaseMappingSet {
+  repeated DatabaseMapping Mappings = 1;
+}

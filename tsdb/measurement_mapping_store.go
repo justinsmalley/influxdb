@@ -55,23 +55,38 @@ func NewMeasurementMappingStore(path string) (*MeasurementMappingStore, error) {
 	return store, store.load()
 }
 
-// GetInternalFieldName returns the internal field name for a user-facing field name
+// GetInternalMeasurementName returns the internal measurement name for a user-facing measurement name
+// Returns the internal name and a boolean indicating if it is active.
 func (s *MeasurementMappingStore) GetInternalMeasurementName(userName string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	hasAny := false
-	for _, m := range s.mappings {
+	hasActive := false
+	var internalName string
+	hasDeletedOrRenamed := false
+
+	// Iterate backwards to find the most recent mapping
+	for i := len(s.mappings) - 1; i >= 0; i-- {
+		m := s.mappings[i]
 		if m.UserName == userName {
-			hasAny = true
 			if m.State == MeasurementMappingState_MEASUREMENT_ACTIVE {
-				return m.InternalName, true
+				hasActive = true
+				internalName = m.InternalName
+				break // Found the active mapping
+			} else {
+				hasDeletedOrRenamed = true
+				// We found a non-active mapping, but we should continue checking older ones
+				// just in case there's an active one (which shouldn't happen if state transitions are correct, but good to be safe)
 			}
 		}
 	}
 
-	if hasAny {
-		return "", false // exists but is not active
+	if hasActive {
+		return internalName, true
+	}
+
+	if hasDeletedOrRenamed {
+		return "", false // exists in history but is not currently active
 	}
 
 	return userName, true // implicit identity mapping
@@ -90,7 +105,10 @@ func (s *MeasurementMappingStore) RenameMeasurement(oldName, newName string) err
 		return fmt.Errorf("invalid new measurement name")
 	}
 
-	// Check if new name already exists and is active
+	// Check if new name already exists and is active (or if it exists implicitly)
+	// We need to verify if there is any active data for the newName, even if it doesn't have an explicit mapping.
+	// For now, we only block if there's an explicit active mapping for the new name.
+	// TODO: Consider checking if implicit data exists for the new name.
 	for _, m := range s.mappings {
 		if m.UserName == newName && m.State == MeasurementMappingState_MEASUREMENT_ACTIVE {
 			return fmt.Errorf("measurement %s already exists and is active", newName)
@@ -223,12 +241,14 @@ func (s *MeasurementMappingStore) GetUserMeasurementNames(internalMeasurementNam
 		var activeUserName string
 		hasAnyMapping := false
 
-		for _, m := range s.mappings {
+		// Iterate backwards to find the most recent active mapping for this internal name
+		for i := len(s.mappings) - 1; i >= 0; i-- {
+			m := s.mappings[i]
 			if m.InternalName == internalName {
 				hasAnyMapping = true
 				if m.State == MeasurementMappingState_MEASUREMENT_ACTIVE {
 					activeUserName = m.UserName
-					break
+					break // Found the active mapping
 				}
 			}
 		}

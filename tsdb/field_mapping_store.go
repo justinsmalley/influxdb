@@ -66,18 +66,32 @@ func (s *FieldMappingStore) GetInternalFieldName(measurement, userName string) (
 		return userName, true // implicit identity mapping
 	}
 
-	hasAny := false
-	for _, m := range measurementMappings {
+	hasActive := false
+	var internalName string
+	hasDeletedOrRenamed := false
+
+	// Iterate backwards to find the most recent mapping
+	for i := len(measurementMappings) - 1; i >= 0; i-- {
+		m := measurementMappings[i]
 		if m.UserName == userName {
-			hasAny = true
 			if m.State == FieldMappingState_ACTIVE {
-				return m.InternalName, true
+				hasActive = true
+				internalName = m.InternalName
+				break // Found the active mapping
+			} else {
+				hasDeletedOrRenamed = true
+				// We found a non-active mapping, but we should continue checking older ones
+				// just in case there's an active one (which shouldn't happen if state transitions are correct, but good to be safe)
 			}
 		}
 	}
 
-	if hasAny {
-		return "", false // field exists but is not active (deleted or renamed)
+	if hasActive {
+		return internalName, true
+	}
+
+	if hasDeletedOrRenamed {
+		return "", false // field exists in history but is not currently active
 	}
 
 	return userName, true // implicit identity mapping
@@ -100,7 +114,9 @@ func (s *FieldMappingStore) RenameField(measurement, oldName, newName string) er
 	}
 	measMappings := s.mappings[measurement]
 
-	// Check if new name already exists and is active
+	// Check if new name already exists and is active (or if it exists implicitly)
+	// Just like with measurements, we should ideally check if implicit data exists.
+	// For now, only block if there's an explicit active mapping.
 	for _, m := range measMappings {
 		if m.UserName == newName && m.State == FieldMappingState_ACTIVE {
 			return fmt.Errorf("field %s already exists and is active", newName)
@@ -261,12 +277,14 @@ func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldN
 		var activeUserName string
 		hasAnyMapping := false
 
-		for _, m := range measurementMappings {
+		// Iterate backwards to find the most recent active mapping
+		for i := len(measurementMappings) - 1; i >= 0; i-- {
+			m := measurementMappings[i]
 			if m.InternalName == internalName {
 				hasAnyMapping = true
 				if m.State == FieldMappingState_ACTIVE {
 					activeUserName = m.UserName
-					break
+					break // Found the active mapping
 				}
 			}
 		}

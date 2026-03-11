@@ -287,6 +287,17 @@ func (s *Server) appendHTTPDService(c httpd.Config) {
 	srv.Handler.QueryExecutor = s.QueryExecutor
 	srv.Handler.Monitor = s.Monitor
 	srv.Handler.PointsWriter = s.PointsWriter
+	srv.Handler.TranslateDatabase = func(db string) (string, error) {
+		if mappingStore, err := s.TSDBStore.DatabaseMappingStore(); err == nil {
+			internal, isActive := mappingStore.GetInternalDatabaseName(db)
+			if isActive {
+				return internal, nil
+			} else if internal == "" {
+				return "", fmt.Errorf("database not found: %q", db) // explicitly marked inactive
+			}
+		}
+		return db, nil
+	}
 	srv.Handler.Version = s.buildInfo.Version
 	srv.Handler.BuildType = "OSS"
 	ss := storage.NewStore(s.TSDBStore, s.MetaClient)

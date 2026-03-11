@@ -96,6 +96,9 @@ type Handler struct {
 	Version   string
 	BuildType string
 
+	// TranslateDatabase translates user database names to internal database names
+	TranslateDatabase func(db string) (string, error)
+
 	MetaClient interface {
 		Database(name string) *meta.DatabaseInfo
 		Databases() []meta.DatabaseInfo
@@ -511,6 +514,15 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user meta.U
 	p := influxql.NewParser(qr)
 	db := r.FormValue("db")
 
+	if h.TranslateDatabase != nil && db != "" {
+		var err error
+		db, err = h.TranslateDatabase(db)
+		if err != nil {
+			h.httpError(rw, err.Error(), http.StatusNotFound)
+			return
+		}
+	}
+
 	// Sanitize the request query params so it doesn't show up in the response logger.
 	// Do this before anything else so a parsing error doesn't leak passwords.
 	sanitize(r)
@@ -794,6 +806,15 @@ func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user meta.U
 		return
 	}
 
+	if h.TranslateDatabase != nil {
+		var err error
+		database, err = h.TranslateDatabase(database)
+		if err != nil {
+			h.httpError(w, err.Error(), http.StatusNotFound)
+			return
+		}
+	}
+
 	if di := h.MetaClient.Database(database); di == nil {
 		h.httpError(w, fmt.Sprintf("database not found: %q", database), http.StatusNotFound)
 		return
@@ -983,6 +1004,15 @@ func (h *Handler) servePromWrite(w http.ResponseWriter, r *http.Request, user me
 		return
 	}
 
+	if h.TranslateDatabase != nil {
+		var err error
+		database, err = h.TranslateDatabase(database)
+		if err != nil {
+			h.httpError(w, err.Error(), http.StatusNotFound)
+			return
+		}
+	}
+
 	if di := h.MetaClient.Database(database); di == nil {
 		h.httpError(w, fmt.Sprintf("database not found: %q", database), http.StatusNotFound)
 		return
@@ -1123,6 +1153,15 @@ func (h *Handler) servePromRead(w http.ResponseWriter, r *http.Request, user met
 	// Query the DB and create a ReadResponse for Prometheus
 	db := r.FormValue("db")
 	rp := r.FormValue("rp")
+
+	if h.TranslateDatabase != nil && db != "" {
+		var err error
+		db, err = h.TranslateDatabase(db)
+		if err != nil {
+			h.httpError(w, err.Error(), http.StatusNotFound)
+			return
+		}
+	}
 
 	readRequest, err := prometheus.ReadRequestToInfluxStorageRequest(&req, db, rp)
 	if err != nil {
