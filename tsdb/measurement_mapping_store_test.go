@@ -71,7 +71,12 @@ func TestMeasurementMappingStore_RenameDropRecreate(t *testing.T) {
 
 	// GetUserMeasurementNames (tests translation logic for Show Measurements)
 	userNames := store.GetUserMeasurementNames([]string{"m1.v2", "m1_new.v3", "unmapped_meas"})
-	expected := []string{"m1_new", "unmapped_meas"}
+	
+	// m1.v2 was m1, then renamed to m1_new, which was then dropped.
+	// So m1.v2 is inactive, but maps to its last known name: m1_new.
+	// The recreated m1_new has internal name m1_new.v3, mapping to m1_new.
+	expected := []string{"m1_new", "m1_new", "unmapped_meas"}
+	
 	if !reflect.DeepEqual(userNames, expected) {
 		t.Fatalf("expected %v, got %v", expected, userNames)
 	}

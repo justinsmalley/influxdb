@@ -2107,8 +2107,7 @@ func TestEngine_Invalid_UTF8(t *testing.T) {
 					t.Fatalf("unexpected error re-opening engine: %v", err)
 				}
 			} else {
-				// Wait, the original test expected it to fail during Reopen?
-				// Actually, if we validate at WritePoints, it won't even get written.
+				// If we validate at WritePoints, it won't even get written.
 				// But let's check if the original intent was that the field name is invalid UTF-8 and TSM catches it on load.
 			}
 		})

@@ -2406,16 +2406,15 @@ func (e *Engine) translateNamesInOptions(measurement string, opt query.IteratorO
 	if db == "" {
 		return measurement, opt
 	}
-
+	
 	internalMeasurement := measurement
 
 	// Translate measurement name
 	if measMappingStore, err := e.store.MeasurementMappingStore(db); err == nil {
 		if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
 			internalMeasurement = internal
-		} else if internal == "" {
-			// Measurement is explicitly inactive (renamed or deleted), so we must not use the original name
-			// as it might falsely match internal data. Setting it to empty ensures the engine finds nothing.
+		} else {
+			// Measurement is explicitly inactive (dropped/renamed away), ensure engine finds nothing
 			internalMeasurement = ""
 		}
 	}
@@ -2431,9 +2430,14 @@ func (e *Engine) translateNamesInOptions(measurement string, opt query.IteratorO
 	opt.Expr = e.translateExpr(opt.Expr, internalMeasurement, fieldMappingStore)
 
 	// Translate auxiliary fields
-	for i, aux := range opt.Aux {
-		if internalName, isActive := fieldMappingStore.GetInternalFieldName(internalMeasurement, aux.Val); isActive {
-			opt.Aux[i].Val = internalName
+	if len(opt.Aux) > 0 {
+		// Replace the opt.Aux slice entirely with translated references
+		for i, aux := range opt.Aux {
+			if internalName, isActive := fieldMappingStore.GetInternalFieldName(internalMeasurement, aux.Val); isActive {
+				opt.Aux[i] = influxql.VarRef{Val: internalName, Type: aux.Type}
+			} else {
+				opt.Aux[i] = influxql.VarRef{Val: "", Type: aux.Type}
+			}
 		}
 	}
 
@@ -2448,39 +2452,18 @@ func (e *Engine) translateExpr(expr influxql.Expr, measurement string, fieldMapp
 	if expr == nil {
 		return nil
 	}
-
-	switch expr := expr.(type) {
-	case *influxql.VarRef:
-		// Translate the field name using centralized store
-		if internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, expr.Val); isActive {
-			// Create a new VarRef with the internal name
-			newExpr := *expr
-			newExpr.Val = internalName
-			return &newExpr
+	
+	expr = influxql.CloneExpr(expr)
+	return influxql.RewriteExpr(expr, func(ex influxql.Expr) influxql.Expr {
+		if ref, ok := ex.(*influxql.VarRef); ok {
+			if internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, ref.Val); isActive {
+				ref.Val = internalName
+			} else {
+				ref.Val = ""
+			}
 		}
-		return expr
-	case *influxql.Call:
-		// Translate field names in the call arguments
-		newCall := *expr
-		newCall.Args = make([]influxql.Expr, len(expr.Args))
-		for i, arg := range expr.Args {
-			newCall.Args[i] = e.translateExpr(arg, measurement, fieldMappingStore)
-		}
-		return &newCall
-	case *influxql.BinaryExpr:
-		// Translate field names in binary expressions (e.g., WHERE clauses)
-		newBinary := *expr
-		newBinary.LHS = e.translateExpr(expr.LHS, measurement, fieldMappingStore)
-		newBinary.RHS = e.translateExpr(expr.RHS, measurement, fieldMappingStore)
-		return &newBinary
-	case *influxql.ParenExpr:
-		// Translate field names in parenthesized expressions
-		newParen := *expr
-		newParen.Expr = e.translateExpr(expr.Expr, measurement, fieldMappingStore)
-		return &newParen
-	default:
-		return expr
-	}
+		return ex
+	})
 }
 
 type indexTagSets interface {

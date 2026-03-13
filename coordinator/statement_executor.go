@@ -386,8 +386,9 @@ func (e *StatementExecutor) executeDropDatabaseStatement(stmt *influxql.DropData
 			if internal, isActive := mappingStore.GetInternalDatabaseName(userName); isActive {
 				internalName = internal
 			}
-			// Mark it deleted in the mapping store
-			_ = mappingStore.SoftDeleteDatabase(userName)
+			// Let TSDBStore.DeleteDatabase handle the mapping cleanup.
+			// It will completely remove the database from the mapping store
+			// instead of just soft deleting it, ensuring a clean slate if recreated.
 		}
 	}
 
@@ -409,6 +410,11 @@ func (e *StatementExecutor) executeDropMeasurementStatement(stmt *influxql.DropM
 		return query.ErrDatabaseNotFound(database)
 	}
 
+	internalDatabase, err := e.translateDatabaseName(database)
+	if err == nil && internalDatabase != "" {
+		database = internalDatabase
+	}
+
 	// Locally drop the measurement
 	return e.TSDBStore.DeleteMeasurement(database, stmt.Name)
 }
@@ -416,6 +422,11 @@ func (e *StatementExecutor) executeDropMeasurementStatement(stmt *influxql.DropM
 func (e *StatementExecutor) executeDropSeriesStatement(stmt *influxql.DropSeriesStatement, database string) error {
 	if dbi := e.MetaClient.Database(database); dbi == nil {
 		return query.ErrDatabaseNotFound(database)
+	}
+
+	internalDatabase, err := e.translateDatabaseName(database)
+	if err == nil && internalDatabase != "" {
+		database = internalDatabase
 	}
 
 	// Check for time in WHERE clause (not supported).
@@ -500,10 +511,13 @@ func (e *StatementExecutor) RenameDatabase(oldName, newName string) error {
 	if mappingStore, err := store.DatabaseMappingStore(); err == nil {
 		internalNewName, isActive := mappingStore.GetInternalDatabaseName(newName)
 		if isActive && internalNewName == newName {
+			// If it's active and hasn't been remapped, it means it's an implicit mapping.
+			// Check if there's actual data in the meta store for this database.
 			if e.MetaClient != nil && e.MetaClient.Database(newName) != nil {
 				return fmt.Errorf("database %s already exists", newName)
 			}
 		}
+		// The mapping store's RenameMapping will handle checking for inactive/explicit mappings.
 	}
 
 	return store.RenameDatabaseMapping(oldName, newName)
@@ -516,6 +530,24 @@ func (e *StatementExecutor) executeRenameMeasurementStatement(q *influxql.Rename
 		db = database
 	}
 	return e.RenameMeasurement(db, q.OldName, q.NewName)
+}
+
+// translateDatabaseName translates the user-facing database name to the internal name.
+func (e *StatementExecutor) translateDatabaseName(database string) (string, error) {
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		return database, nil
+	}
+	mappingStore, err := store.DatabaseMappingStore()
+	if err == nil {
+		internal, isActive := mappingStore.GetInternalDatabaseName(database)
+		if isActive {
+			return internal, nil
+		} else if internal == "" {
+			return "", query.ErrDatabaseNotFound(database)
+		}
+	}
+	return database, nil
 }
 
 // RenameMeasurement renames a measurement in a database
@@ -532,12 +564,19 @@ func (e *StatementExecutor) RenameMeasurement(database, oldName, newName string)
 		return nil
 	}
 
+	internalDatabase, err := e.translateDatabaseName(database)
+	if err != nil {
+		return err
+	}
+	database = internalDatabase
+
 	measMappingStore, err := store.MeasurementMappingStore(database)
 	if err != nil {
 		return err
 	}
 
-	// Check if new measurement name already implicitly exists in any shard
+	// Check if new measurement name already implicitly exists in any shard.
+	// The mapping store's RenameMapping will handle whether it already explicitly exists (active or inactive).
 	internalNewName, isActive := measMappingStore.GetInternalMeasurementName(newName)
 	if isActive && internalNewName == newName {
 		if e.MetaClient != nil {
@@ -580,6 +619,12 @@ func (e *StatementExecutor) DropField(database, measurement, fieldName string) e
 		return nil
 	}
 
+	internalDatabase, err := e.translateDatabaseName(database)
+	if err != nil {
+		return err
+	}
+	database = internalDatabase
+
 	// Get the centralized field mapping store
 	fieldMappingStore, err := store.FieldMappingStore(database)
 	if err != nil {
@@ -605,6 +650,13 @@ func (e *StatementExecutor) RenameField(database, measurement, oldName, newName 
 		return nil
 	}
 
+	internalDatabase, err := e.translateDatabaseName(database)
+	if err != nil {
+		return err
+	}
+	database = internalDatabase
+
+	/*
 	// Map to internal measurement name
 	internalMeasurement := measurement
 	if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
@@ -612,6 +664,7 @@ func (e *StatementExecutor) RenameField(database, measurement, oldName, newName 
 			internalMeasurement = internal
 		}
 	}
+	*/
 
 	// Get the centralized field mapping store
 	fieldMappingStore, err := store.FieldMappingStore(database)
@@ -619,30 +672,8 @@ func (e *StatementExecutor) RenameField(database, measurement, oldName, newName 
 		return err
 	}
 
-	// Check if new field name already implicitly exists in any shard
-	internalNewName, isActive := fieldMappingStore.GetInternalFieldName(measurement, newName)
-	if isActive && internalNewName == newName {
-		if e.MetaClient != nil {
-			if dbi := e.MetaClient.Database(database); dbi != nil {
-				var shardIDs []uint64
-				for _, rpi := range dbi.RetentionPolicies {
-					for _, sgi := range rpi.ShardGroups {
-						for _, sh := range sgi.Shards {
-							shardIDs = append(shardIDs, sh.ID)
-						}
-					}
-				}
-				shards := store.Shards(shardIDs)
-				for _, sh := range shards {
-					if mf := sh.MeasurementFields([]byte(internalMeasurement)); mf != nil {
-						if mf.HasField(newName) {
-							return fmt.Errorf("field %s already exists", newName)
-						}
-					}
-				}
-			}
-		}
-	}
+	// Check if new field name already implicitly exists in any shard.
+	// The mapping store's RenameMapping will handle whether it already explicitly exists (active or inactive).
 
 	// Single operation on centralized store - no shard iteration needed!
 	return fieldMappingStore.RenameField(measurement, oldName, newName)
@@ -999,11 +1030,6 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 			continue
 		}
 
-		// Translate field names in the result row from internal names to user-facing names
-		if err := e.translateResultNames(row, ctx.Database); err != nil {
-			return err
-		}
-
 		result := &query.Result{
 			Series:  []*models.Row{row},
 			Partial: partial,
@@ -1158,7 +1184,12 @@ func (e *StatementExecutor) executeShowMeasurementsStatement(q *influxql.ShowMea
 		return ErrDatabaseNameRequired
 	}
 
-	names, err := e.TSDBStore.MeasurementNames(ctx.Authorizer, q.Database, q.Condition)
+	internalDatabase := q.Database
+	if internal, err := e.translateDatabaseName(q.Database); err == nil && internal != "" {
+		internalDatabase = internal
+	}
+
+	names, err := e.TSDBStore.MeasurementNames(ctx.Authorizer, internalDatabase, q.Condition)
 	if err != nil || len(names) == 0 {
 		return ctx.Send(&query.Result{
 			Err: err,
@@ -1168,7 +1199,7 @@ func (e *StatementExecutor) executeShowMeasurementsStatement(q *influxql.ShowMea
 	// Translate internal measurement names to user-facing names
 	var userFacingNames []string
 	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
-		if measMappingStore, err := store.MeasurementMappingStore(q.Database); err == nil {
+		if measMappingStore, err := store.MeasurementMappingStore(internalDatabase); err == nil {
 			// Convert byte slices to strings
 			internalNames := make([]string, len(names))
 			for i, name := range names {
@@ -1873,105 +1904,6 @@ type LocalTSDBStore struct {
 	*tsdb.Store
 }
 
-// translateResultNames translates internal measurement and field names in the result row to user-facing names
-func (e *StatementExecutor) translateResultNames(row *models.Row, database string) error {
-	if row == nil {
-		return nil
-	}
-
-	// Cast TSDBStore
-	store, ok := e.TSDBStore.(*tsdb.Store)
-	if !ok {
-		return nil
-	}
-
-	// 1. Translate Measurement Name
-	if row.Name != "" {
-		if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
-			// For a result row, the name is likely already translated because it was parsed from AST user input!
-			// Actually, if a query uses a regex, the row.Name returned by engine might be the internal name.
-			// However, in InfluxDB, the row name typically matches the user query.
-			// Let's assume the row.Name could be an internal name and try to map it back to a user name.
-			// Wait, the reverse mapping: we have internal name, need user name.
-			// GetUserMeasurementNames handles this deduplication and reverse mapping.
-			userNames := measMappingStore.GetUserMeasurementNames([]string{row.Name})
-			if len(userNames) > 0 {
-				row.Name = userNames[0]
-			}
-		}
-	}
-
-	if len(row.Columns) == 0 {
-		return nil
-	}
-
-	// Get the internal measurement name (we need this to look up fields)
-	// Since we might have just translated row.Name, we need to know the true internal name.
-	internalMeasurement := row.Name
-	if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
-		if internal, isActive := measMappingStore.GetInternalMeasurementName(row.Name); isActive {
-			internalMeasurement = internal
-		}
-	}
-
-	// Translate Field Names
-	fieldMappingStore, err := store.FieldMappingStore(database)
-	if err != nil {
-		return nil
-	}
-
-	mappings := fieldMappingStore.GetAllMappings(internalMeasurement)
-
-	internalToMapping := make(map[string]struct {
-		userName string
-		state    tsdb.FieldMappingState
-	})
-	// Iterate forwards so we populate with the oldest mapping first, then overwrite with newer mappings.
-	// That way the map contains the MOST RECENT mapping state for any given internal name.
-	for _, m := range mappings {
-		internalToMapping[m.InternalName] = struct {
-			userName string
-			state    tsdb.FieldMappingState
-		}{m.UserName, m.State}
-	}
-
-	translatedColumns := make([]string, 0, len(row.Columns))
-	columnIndices := make([]int, 0, len(row.Columns))
-
-	for i, colName := range row.Columns {
-		if colName == "time" {
-			translatedColumns = append(translatedColumns, colName)
-			columnIndices = append(columnIndices, i)
-		} else {
-			if mapping, exists := internalToMapping[colName]; exists {
-				if mapping.state == tsdb.FieldMappingState_ACTIVE {
-					translatedColumns = append(translatedColumns, mapping.userName)
-					columnIndices = append(columnIndices, i)
-				}
-			} else {
-				translatedColumns = append(translatedColumns, colName)
-				columnIndices = append(columnIndices, i)
-			}
-		}
-	}
-
-	row.Columns = translatedColumns
-
-	if len(columnIndices) < len(row.Values) && len(row.Values) > 0 {
-		translatedValues := make([][]interface{}, len(row.Values))
-		for i, vRow := range row.Values {
-			filteredRow := make([]interface{}, len(columnIndices))
-			for j, idx := range columnIndices {
-				filteredRow[j] = vRow[idx]
-			}
-			translatedValues[i] = filteredRow
-		}
-		row.Values = translatedValues
-	}
-
-	return nil
-}
-
 // ShardIteratorCreator is an interface for creating an IteratorCreator to access a specific shard.
 type ShardIteratorCreator interface {
 	ShardIteratorCreator(id uint64) query.IteratorCreator
@@ -2004,6 +1936,12 @@ func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.Sho
 		// Mock implementation or tests might not provide *tsdb.Store
 		return nil
 	}
+
+	internalDatabase, err := e.translateDatabaseName(database)
+	if err != nil {
+		return err
+	}
+	database = internalDatabase
 
 	fieldMappingStore, err := store.FieldMappingStore(database)
 	if err != nil {

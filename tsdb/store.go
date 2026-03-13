@@ -904,12 +904,27 @@ func (s *Store) DeleteDatabase(name string) error {
 
 	// Remove field and measurement mapping stores from cache
 	s.fieldMappingMu.Lock()
-	delete(s.fieldMappingStores, name)
+	if store, exists := s.fieldMappingStores[name]; exists {
+		os.Remove(store.path) // Remove mapping file from disk
+		delete(s.fieldMappingStores, name)
+	}
 	s.fieldMappingMu.Unlock()
 
 	s.measurementMappingMu.Lock()
-	delete(s.measurementMappingStores, name)
+	if store, exists := s.measurementMappingStores[name]; exists {
+		os.Remove(store.path) // Remove mapping file from disk
+		delete(s.measurementMappingStores, name)
+	}
 	s.measurementMappingMu.Unlock()
+
+	// Remove database from DatabaseMappingStore
+	s.databaseMappingMu.RLock()
+	dbMappingStore := s.databaseMappingStore
+	s.databaseMappingMu.RUnlock()
+
+	if dbMappingStore != nil {
+		dbMappingStore.DropDatabaseMappingByInternal(name) // name is internalName here
+	}
 
 	return nil
 }
@@ -980,16 +995,44 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 	epochs := s.epochsForShards(shards)
 	s.mu.RUnlock()
 
-	// Handle measurement mappings: resolve internal name and soft delete
+	// Handle measurement mappings: resolve internal name and completely remove mapping
 	internalName := name
 	if store, err := s.MeasurementMappingStore(database); err == nil {
 		if internal, isActive := store.GetInternalMeasurementName(name); isActive {
 			internalName = internal
 		}
 
-		// Soft delete it in the mapping store
-		if err := store.SoftDeleteMeasurement(name); err != nil {
-			// If it fails because it's already not active, that's fine, continue to drop underlying data just in case
+		// Completely remove it from the mapping store instead of soft deleting
+		// This guarantees the name is fully released for recreation
+		store.mu.Lock()
+		if _, exists := store.mappings[""]; exists { // Measurement mappings use a single group ""
+			// Find and remove all mappings with this user name
+			var newMappings []*MappingEntry
+			for _, m := range store.mappings[""] {
+				if m.UserName != name {
+					newMappings = append(newMappings, m)
+				}
+			}
+			store.mappings[""] = newMappings
+			
+			store.mu.Unlock()
+			store.Save() // Save to disk
+		} else {
+			store.mu.Unlock()
+		}
+	}
+
+	// Also completely remove field mappings for this measurement
+	if fieldStore, err := s.FieldMappingStore(database); err == nil {
+		// Field mappings are keyed by MeasurementName
+		fieldStore.mu.Lock()
+		if _, exists := fieldStore.mappings[name]; exists {
+			delete(fieldStore.mappings, name)
+			// Save the updated store to disk
+			fieldStore.mu.Unlock() // Unlock before saving
+			fieldStore.Save()
+		} else {
+			fieldStore.mu.Unlock()
 		}
 	}
 

@@ -595,6 +595,16 @@ func (r *UnsignedDifferenceReducer) Emit() []UnsignedPoint {
 	return nil
 }
 
+// calculateEmitTime computes the shifted timestamp for centered windows.
+// For centered windows, shift the result timestamp backward by windowSize/2
+func calculateEmitTime(time int64, center bool, windowSize int, interval time.Duration) int64 {
+	if center {
+		halfSpanNS := (int64(windowSize-1) * interval.Nanoseconds()) / 2
+		return time - halfSpanNS
+	}
+	return time
+}
+
 // FloatMovingAverageReducer calculates the moving average of the aggregated points.
 type FloatMovingAverageReducer struct {
 	pos        int
@@ -638,41 +648,7 @@ func (r *FloatMovingAverageReducer) AggregateFloat(p *FloatPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window
 func (r *FloatMovingAverageReducer) validPoints() ([]float64, int64) {
-	if r.time == 0 {
-		return []float64{}, 0
-	}
-
-	var validStart, validEnd int64
-	intervalNS := r.interval.Nanoseconds()
-
-	if r.center {
-		// For centered windows with GROUP BY, we can't access future data
-		// Instead, treat it like trailing but shift the output backward
-		windowSpanNS := int64(r.windowSize-1) * intervalNS
-		validStart = r.time - windowSpanNS
-		validEnd = r.time
-	} else {
-		// Trailing window: include points before and including current
-		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
-		validEnd = r.time
-	}
-
-	var validValues []float64
-	sum := 0.0
-	validCount := 0
-
-	for i := 0; i < len(r.valueBuf); i++ {
-		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
-			validValues = append(validValues, r.valueBuf[i])
-			sum += r.valueBuf[i]
-			validCount++
-		}
-	}
-
-	if validCount >= r.minPeriods {
-		return []float64{sum / float64(validCount)}, int64(validCount)
-	}
-	return []float64{}, int64(validCount)
+	return calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving average of the current window. Emit should be called
@@ -688,12 +664,7 @@ func (r *FloatMovingAverageReducer) Emit() []FloatPoint {
 		return []FloatPoint{}
 	}
 
-	// For centered windows, shift the result timestamp backward by windowSize/2
-	emitTime := r.time
-	if r.center {
-		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
-		emitTime = r.time - halfSpanNS
-	}
+	emitTime := calculateEmitTime(r.time, r.center, r.windowSize, r.interval)
 
 	return []FloatPoint{
 		{
@@ -747,38 +718,7 @@ func (r *IntegerMovingAverageReducer) AggregateInteger(p *IntegerPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window
 func (r *IntegerMovingAverageReducer) validPoints() ([]float64, int64) {
-	if r.time == 0 {
-		return []float64{}, 0
-	}
-
-	var validStart, validEnd int64
-	intervalNS := r.interval.Nanoseconds()
-
-	if r.center {
-		// For centered windows with GROUP BY, we can't access future data
-		// Instead, treat it like trailing but shift the output backward
-		windowSpanNS := int64(r.windowSize-1) * intervalNS
-		validStart = r.time - windowSpanNS
-		validEnd = r.time
-	} else {
-		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
-		validEnd = r.time
-	}
-
-	sum := int64(0)
-	validCount := 0
-
-	for i := 0; i < len(r.valueBuf); i++ {
-		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
-			sum += r.valueBuf[i]
-			validCount++
-		}
-	}
-
-	if validCount >= r.minPeriods {
-		return []float64{float64(sum) / float64(validCount)}, int64(validCount)
-	}
-	return []float64{}, int64(validCount)
+	return calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving average of the current window. Emit should be called
@@ -794,12 +734,7 @@ func (r *IntegerMovingAverageReducer) Emit() []FloatPoint {
 		return []FloatPoint{}
 	}
 
-	// For centered windows, shift the result timestamp backward by windowSize/2
-	emitTime := r.time
-	if r.center {
-		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
-		emitTime = r.time - halfSpanNS
-	}
+	emitTime := calculateEmitTime(r.time, r.center, r.windowSize, r.interval)
 
 	return []FloatPoint{
 		{
@@ -853,38 +788,7 @@ func (r *UnsignedMovingAverageReducer) AggregateUnsigned(p *UnsignedPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window
 func (r *UnsignedMovingAverageReducer) validPoints() ([]float64, int64) {
-	if r.time == 0 {
-		return []float64{}, 0
-	}
-
-	var validStart, validEnd int64
-	intervalNS := r.interval.Nanoseconds()
-
-	if r.center {
-		// For centered windows with GROUP BY, we can't access future data
-		// Instead, treat it like trailing but shift the output backward
-		windowSpanNS := int64(r.windowSize-1) * intervalNS
-		validStart = r.time - windowSpanNS
-		validEnd = r.time
-	} else {
-		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
-		validEnd = r.time
-	}
-
-	sum := uint64(0)
-	validCount := 0
-
-	for i := 0; i < len(r.valueBuf); i++ {
-		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
-			sum += r.valueBuf[i]
-			validCount++
-		}
-	}
-
-	if validCount >= r.minPeriods {
-		return []float64{float64(sum) / float64(validCount)}, int64(validCount)
-	}
-	return []float64{}, int64(validCount)
+	return calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving average of the current window. Emit should be called
@@ -900,12 +804,7 @@ func (r *UnsignedMovingAverageReducer) Emit() []FloatPoint {
 		return []FloatPoint{}
 	}
 
-	// For centered windows, shift the result timestamp backward by windowSize/2
-	emitTime := r.time
-	if r.center {
-		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
-		emitTime = r.time - halfSpanNS
-	}
+	emitTime := calculateEmitTime(r.time, r.center, r.windowSize, r.interval)
 
 	return []FloatPoint{
 		{
@@ -958,52 +857,7 @@ func (r *FloatMovingMedianReducer) AggregateFloat(p *FloatPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window and returns median
 func (r *FloatMovingMedianReducer) validPoints() ([]float64, int64) {
-	if r.time == 0 {
-		return []float64{}, 0
-	}
-
-	var validStart, validEnd int64
-	intervalNS := r.interval.Nanoseconds()
-
-	if r.center {
-		// For centered windows with GROUP BY, we can't access future data
-		// Instead, treat it like trailing but shift the output backward
-		// The window span calculation should only look at past data
-		windowSpanNS := int64(r.windowSize-1) * intervalNS
-		validStart = r.time - windowSpanNS
-		validEnd = r.time
-	} else {
-		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
-		validEnd = r.time
-	}
-
-	var validValues []float64
-
-	// Iterate through the buffer (they're stored in chronological order)
-	for i := 0; i < len(r.valueBuf); i++ {
-		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
-			validValues = append(validValues, r.valueBuf[i])
-		}
-	}
-
-	if len(validValues) < r.minPeriods {
-		return []float64{}, int64(len(validValues))
-	}
-
-	if len(validValues) == 1 {
-		return []float64{validValues[0]}, int64(len(validValues))
-	}
-
-	// Sort values
-	sort.Slice(validValues, func(i, j int) bool {
-		return validValues[i] < validValues[j]
-	})
-
-	if len(validValues)%2 == 0 {
-		lo, hi := validValues[len(validValues)/2-1], validValues[len(validValues)/2]
-		return []float64{lo + (hi-lo)/2}, int64(len(validValues))
-	}
-	return []float64{validValues[len(validValues)/2]}, int64(len(validValues))
+	return calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving median of the current window. Emit should be called
@@ -1019,12 +873,7 @@ func (r *FloatMovingMedianReducer) Emit() []FloatPoint {
 		return []FloatPoint{}
 	}
 
-	// For centered windows, shift the result timestamp backward by windowSize/2
-	emitTime := r.time
-	if r.center {
-		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
-		emitTime = r.time - halfSpanNS
-	}
+	emitTime := calculateEmitTime(r.time, r.center, r.windowSize, r.interval)
 
 	return []FloatPoint{
 		{
@@ -1077,49 +926,7 @@ func (r *IntegerMovingMedianReducer) AggregateInteger(p *IntegerPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window and returns median
 func (r *IntegerMovingMedianReducer) validPoints() ([]float64, int64) {
-	if r.time == 0 {
-		return []float64{}, 0
-	}
-
-	var validStart, validEnd int64
-	intervalNS := r.interval.Nanoseconds()
-
-	if r.center {
-		// For centered windows with GROUP BY, we can't access future data
-		// Instead, treat it like trailing but shift the output backward
-		windowSpanNS := int64(r.windowSize-1) * intervalNS
-		validStart = r.time - windowSpanNS
-		validEnd = r.time
-	} else {
-		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
-		validEnd = r.time
-	}
-
-	var validValues []int64
-	for i := 0; i < len(r.valueBuf); i++ {
-		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
-			validValues = append(validValues, r.valueBuf[i])
-		}
-	}
-
-	if len(validValues) < r.minPeriods {
-		return []float64{}, int64(len(validValues))
-	}
-
-	if len(validValues) == 1 {
-		return []float64{float64(validValues[0])}, int64(len(validValues))
-	}
-
-	// Sort values
-	sort.Slice(validValues, func(i, j int) bool {
-		return validValues[i] < validValues[j]
-	})
-
-	if len(validValues)%2 == 0 {
-		lo, hi := float64(validValues[len(validValues)/2-1]), float64(validValues[len(validValues)/2])
-		return []float64{lo + (hi-lo)/2}, int64(len(validValues))
-	}
-	return []float64{float64(validValues[len(validValues)/2])}, int64(len(validValues))
+	return calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving median of the current window. Emit should be called
@@ -1135,12 +942,7 @@ func (r *IntegerMovingMedianReducer) Emit() []FloatPoint {
 		return []FloatPoint{}
 	}
 
-	// For centered windows, shift the result timestamp backward by windowSize/2
-	emitTime := r.time
-	if r.center {
-		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
-		emitTime = r.time - halfSpanNS
-	}
+	emitTime := calculateEmitTime(r.time, r.center, r.windowSize, r.interval)
 
 	return []FloatPoint{
 		{
@@ -1193,49 +995,7 @@ func (r *UnsignedMovingMedianReducer) AggregateUnsigned(p *UnsignedPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window and returns median
 func (r *UnsignedMovingMedianReducer) validPoints() ([]float64, int64) {
-	if r.time == 0 {
-		return []float64{}, 0
-	}
-
-	var validStart, validEnd int64
-	intervalNS := r.interval.Nanoseconds()
-
-	if r.center {
-		// For centered windows with GROUP BY, we can't access future data
-		// Instead, treat it like trailing but shift the output backward
-		windowSpanNS := int64(r.windowSize-1) * intervalNS
-		validStart = r.time - windowSpanNS
-		validEnd = r.time
-	} else {
-		validStart = r.time - (int64(r.windowSize-1) * intervalNS)
-		validEnd = r.time
-	}
-
-	var validValues []uint64
-	for i := 0; i < len(r.valueBuf); i++ {
-		if r.timeBuf[i] >= validStart && r.timeBuf[i] <= validEnd {
-			validValues = append(validValues, r.valueBuf[i])
-		}
-	}
-
-	if len(validValues) < r.minPeriods {
-		return []float64{}, int64(len(validValues))
-	}
-
-	if len(validValues) == 1 {
-		return []float64{float64(validValues[0])}, int64(len(validValues))
-	}
-
-	// Sort values
-	sort.Slice(validValues, func(i, j int) bool {
-		return validValues[i] < validValues[j]
-	})
-
-	if len(validValues)%2 == 0 {
-		lo, hi := float64(validValues[len(validValues)/2-1]), float64(validValues[len(validValues)/2])
-		return []float64{lo + (hi-lo)/2}, int64(len(validValues))
-	}
-	return []float64{float64(validValues[len(validValues)/2])}, int64(len(validValues))
+	return calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving median of the current window. Emit should be called
@@ -1251,12 +1011,7 @@ func (r *UnsignedMovingMedianReducer) Emit() []FloatPoint {
 		return []FloatPoint{}
 	}
 
-	// For centered windows, shift the result timestamp backward by windowSize/2
-	emitTime := r.time
-	if r.center {
-		halfSpanNS := (int64(r.windowSize-1) * r.interval.Nanoseconds()) / 2
-		emitTime = r.time - halfSpanNS
-	}
+	emitTime := calculateEmitTime(r.time, r.center, r.windowSize, r.interval)
 
 	return []FloatPoint{
 		{

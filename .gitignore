@@ -81,3 +81,9 @@ man/*.1.gz
 
 # vendored files
 /vendor
+
+/local-data/
+/__pycache__
+*.log
+/e2e_tests/__pycache__
+/etc

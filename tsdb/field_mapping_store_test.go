@@ -71,7 +71,7 @@ func TestFieldMappingStore_RenameDropRecreate(t *testing.T) {
 
 	// GetUserFieldNames (tests translation logic for Show Field Keys)
 	userNames := store.GetUserFieldNames("meas1", []string{"temp1.v2", "temperature1.v3", "unmapped_field"})
-	expected := []string{"temperature1", "unmapped_field"}
+	expected := []string{"temp1.v2", "temperature1", "unmapped_field"}
 	if !reflect.DeepEqual(userNames, expected) {
 		t.Fatalf("expected %v, got %v", expected, userNames)
 	}

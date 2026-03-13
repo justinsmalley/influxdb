@@ -558,7 +558,16 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 	validateKeys := s.options.Config.ValidateKeys
 
 	var j int
+	translatedPoints := make([]models.Point, len(points))
 	for i, p := range points {
+		// Translate field and measurement names using mappings FIRST
+		translatedPoint, err := s.translateNames(p)
+		if err != nil {
+			return nil, nil, fmt.Errorf("name translation failed: %v", err)
+		}
+		translatedPoints[i] = translatedPoint
+		p = translatedPoint
+
 		tags := p.Tags()
 
 		// Drop any series w/ a "time" tag, these are illegal
@@ -584,10 +593,12 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		keys[j] = p.Key()
 		names[j] = p.Name()
 		tagsSlice[j] = tags
-		points[j] = points[i]
+		points[j] = points[i] // keep original point
+		translatedPoints[j] = p // keep translated point
 		j++
 	}
 	points, keys, names, tagsSlice = points[:j], keys[:j], names[:j], tagsSlice[:j]
+	translatedPoints = translatedPoints[:j]
 
 	engine, err := s.engineNoLock()
 	if err != nil {
@@ -609,12 +620,13 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 	}
 
 	j = 0
-	for i, p := range points {
+	for i, p := range translatedPoints {
 		// Skip any points with only invalid fields.
-		iter := p.FieldIterator()
+		// Use the original point for field validation!
+		origIter := points[i].FieldIterator()
 		validField := false
-		for iter.Next() {
-			if bytes.Equal(iter.FieldKey(), timeBytes) {
+		for origIter.Next() {
+			if bytes.Equal(origIter.FieldKey(), timeBytes) {
 				continue
 			}
 			validField = true
@@ -638,8 +650,10 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		name := p.Name()
 		mf := engine.MeasurementFields(name)
 
-		// Check with the field validator.
-		if err := s.options.FieldValidator.Validate(mf, p); err != nil {
+		// Check with the field validator against the ORIGINAL point (points[i]).
+		// We use points[i] here because we want to validate the user-provided field names,
+		// not the internal, translated names (which may include .v1, .v2 suffixes).
+		if err := s.options.FieldValidator.Validate(mf, points[i]); err != nil {
 			switch err := err.(type) {
 			case PartialWriteError:
 				if reason == "" {
@@ -653,18 +667,11 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 			continue
 		}
 
-		points[j] = points[i]
+		translatedPoints[j] = p
 		j++
 
-		// Translate field names using field mappings
-		translatedPoint, err := s.translateNames(points[i])
-		if err != nil {
-			return nil, nil, fmt.Errorf("name translation failed: %v", err)
-		}
-		points[j-1] = translatedPoint
-
 		// Create any fields that are missing.
-		iter.Reset()
+		iter := p.FieldIterator()
 		for iter.Next() {
 			fieldKey := iter.FieldKey()
 
@@ -698,7 +705,7 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		err = PartialWriteError{Reason: reason, Dropped: dropped}
 	}
 
-	return points[:j], fieldsToCreate, err
+	return translatedPoints[:j], fieldsToCreate, err
 }
 
 // translateNames translates user-facing measurement and field names to internal names using mapping stores.
@@ -718,7 +725,8 @@ func (s *Shard) translateNames(point models.Point) (models.Point, error) {
 		return nil, fmt.Errorf("failed to get measurement mapping store: %w", err)
 	}
 
-	if internalName, isActive := measMappingStore.GetInternalMeasurementName(measurement); !isActive {
+	internalName, isActive := measMappingStore.GetInternalMeasurementName(measurement)
+	if !isActive {
 		// Measurement mapping exists but is not active
 		internalName, err = measMappingStore.CreateMeasurementMapping(measurement)
 		if err != nil {
@@ -745,12 +753,65 @@ func (s *Shard) translateNames(point models.Point) (models.Point, error) {
 	needsFieldTranslation := false
 	translatedFields := make(models.Fields, len(fields))
 
+	// Get all mappings for this measurement to avoid taking multiple locks
+	mappings := fieldMappingStore.GetAllMappings(internalMeasurement)
+	// Build reverse mapping dict correctly: we want the MOST RECENT mapping for each UserName
+	// Since mappings are chronological, we iterate forwards and overwrite.
+	// We also ONLY care about the ACTIVE mapping for a UserName.
+	mappingDict := make(map[string]*FieldMappingInfo)
+	for _, m := range mappings {
+		if m.State == FieldMappingState_ACTIVE {
+			mappingDict[m.UserName] = m
+		} else {
+			// If it's not active, we delete it from the dict so we don't accidentally use a renamed/deleted mapping.
+			delete(mappingDict, m.UserName)
+		}
+	}
+
 	for fieldName, value := range fields {
-		internalName, isActive := fieldMappingStore.GetInternalFieldName(internalMeasurement, fieldName)
+		var internalName string
+		isActive := true
+
+		if len(mappings) == 0 {
+			// No mappings for this measurement, implicitly active
+			internalName = fieldName
+		} else {
+			if m, ok := mappingDict[fieldName]; ok {
+				// It has an ACTIVE mapping
+				internalName = m.InternalName
+				isActive = true
+			} else {
+				// It has no ACTIVE mapping.
+				// This could be because it was NEVER mapped, or because it was explicitly deleted/renamed.
+				// If it was explicitly deleted/renamed, its last mapping state is DELETED or RENAMED,
+				// and it must be created anew. We scan all mappings to see if it ever existed.
+				wasMapped := false
+				for _, m := range mappings {
+					if m.UserName == fieldName {
+						wasMapped = true
+					}
+				}
+				
+				if wasMapped {
+					// It WAS mapped but is NOT active. So it must be created anew (new version mapping).
+					isActive = false
+				} else {
+					// It was NEVER mapped. So we just use its name directly as an implicit mapping.
+					internalName = fieldName
+					isActive = true
+				}
+			}
+		}
+
 		if !isActive {
 			internalName, err = fieldMappingStore.CreateFieldMapping(internalMeasurement, fieldName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create field mapping for %s: %w", fieldName, err)
+			}
+			// Update local cache so we don't recreate it if there are multiple points with same field
+			mappingDict[fieldName] = &FieldMappingInfo{
+				InternalName: internalName,
+				State:        FieldMappingState_ACTIVE,
 			}
 		}
 
@@ -1050,10 +1111,13 @@ func (s *Shard) FieldDimensions(measurements []string) (fields map[string]influx
 							hasExplicitMapping = true
 							if m.State == FieldMappingState_ACTIVE {
 								userFacingName = m.UserName
+								isActive = true
+								break // Found the active mapping, we can stop
 							} else {
 								isActive = false
+								// Don't break here, there might be an active mapping later in the list
+								// if the field was renamed.
 							}
-							break
 						}
 					}
 
@@ -1178,18 +1242,46 @@ func (s *Shard) expandSources(sources influxql.Sources) (influxql.Sources, error
 			}
 
 			// Loop over matching measurements.
-			names, err := engine.MeasurementNamesByRegex(src.Regex.Val)
+			// Because measurements might have internal names, we must fetch ALL measurements,
+			// translate them to user names, and then apply the regex against the user names.
+			allNames, err := engine.MeasurementNamesByRegex(regexp.MustCompile(".*"))
 			if err != nil {
 				return nil, err
 			}
 
-			for _, name := range names {
-				other := &influxql.Measurement{
-					Database:        src.Database,
-					RetentionPolicy: src.RetentionPolicy,
-					Name:            string(name),
+			var measMappingStore *MeasurementMappingStore
+			if s.store != nil {
+				measMappingStore, _ = s.store.MeasurementMappingStore(s.database)
+			}
+
+			// Bulk translation is faster
+			internalNamesStr := make([]string, len(allNames))
+			for i, name := range allNames {
+				internalNamesStr[i] = string(name)
+			}
+
+			userNamesStr := internalNamesStr
+			if measMappingStore != nil {
+				userNamesStr = measMappingStore.GetUserMeasurementNames(internalNamesStr)
+			}
+
+			// Apply regex to the user names.
+			for _, userName := range userNamesStr {
+				if userName == "" {
+					continue // skip deleted
 				}
-				set[other.String()] = other
+				if src.Regex.Val.MatchString(userName) {
+					// ExpandSources returns USER-FACING names.
+					// Later, during query execution, `translateNamesInOptions`
+					// will be called to translate the user name to the internal name
+					// before hitting the query engine.
+					other := &influxql.Measurement{
+						Database:        src.Database,
+						RetentionPolicy: src.RetentionPolicy,
+						Name:            userName,
+					}
+					set[other.String()] = other
+				}
 			}
 
 		default:
@@ -1369,17 +1461,34 @@ func (a Shards) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a Shards) MeasurementsByRegex(re *regexp.Regexp) []string {
 	var m map[string]struct{}
 	for _, sh := range a {
-		names, err := sh.MeasurementNamesByRegex(re)
+		names, err := sh.MeasurementNamesByRegex(regexp.MustCompile(".*"))
 		if err != nil {
 			continue // Skip this shard's results—previous behaviour.
+		}
+
+		var measMappingStore *MeasurementMappingStore
+		if sh.store != nil {
+			measMappingStore, _ = sh.store.MeasurementMappingStore(sh.database)
+		}
+
+		internalNamesStr := make([]string, len(names))
+		for i, name := range names {
+			internalNamesStr[i] = string(name)
+		}
+
+		userNamesStr := internalNamesStr
+		if measMappingStore != nil {
+			userNamesStr = measMappingStore.GetUserMeasurementNames(internalNamesStr)
 		}
 
 		if m == nil {
 			m = make(map[string]struct{}, len(names))
 		}
 
-		for _, name := range names {
-			m[string(name)] = struct{}{}
+		for _, userName := range userNamesStr {
+			if userName != "" && re.MatchString(userName) {
+				m[userName] = struct{}{}
+			}
 		}
 	}
 
@@ -1669,11 +1778,6 @@ func (m *MeasurementFields) bytes() int {
 // Returns an error if 255 fields have already been created on the measurement or
 // the fields already exists with a different type.
 func (m *MeasurementFields) CreateFieldIfNotExists(name []byte, typ influxql.DataType) error {
-	// Validate field name
-	if err := ValidateFieldName(string(name)); err != nil {
-		return fmt.Errorf("invalid field name: %w", err)
-	}
-
 	fields := m.fields.Load().(map[string]*Field)
 
 	// Ignore if the field already exists.
