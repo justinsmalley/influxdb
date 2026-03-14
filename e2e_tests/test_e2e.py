@@ -76,10 +76,11 @@ class TestInfluxDBE2E(unittest.TestCase):
 
         mapping_found = False
         for row in series[0]["values"]:
-            if row[0] == "m_test_new" and row[2] == "ACTIVE":
+            # Columns: user_name, internal_name (no state column)
+            if row[0] == "m_test_new":
                 mapping_found = True
                 break
-        self.assertTrue(mapping_found, "Mapping for m_test_new should be ACTIVE")
+        self.assertTrue(mapping_found, "Mapping for m_test_new should be present")
 
         # 4. Write new data to the renamed measurement
         write_points(
@@ -678,10 +679,11 @@ class TestInfluxDBE2E(unittest.TestCase):
 
         mapping_found = False
         for row in series[0]["values"]:
-            if row[0] == DB_NEW and row[2] == "ACTIVE":
+            # Columns: user_name, internal_name (no state column)
+            if row[0] == DB_NEW:
                 mapping_found = True
                 break
-        self.assertTrue(mapping_found, f"Mapping for {DB_NEW} should be ACTIVE")
+        self.assertTrue(mapping_found, f"Mapping for {DB_NEW} should be present")
 
         # 4. Write data using the new database name
         write_points(["m1,tag=1 val=20.0 2000000000"], db=DB_NEW)

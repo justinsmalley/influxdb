@@ -1,5 +1,5 @@
 # Use InfluxDB 1.7.11 as base for compatibility
-FROM influxdb:1.7.11 as base
+FROM influxdb:1.7.11 AS base
 
 # Builder stage with Go 1.13.8 (compatible with InfluxDB 1.7.11)
 FROM golang:1.13.8-alpine AS builder

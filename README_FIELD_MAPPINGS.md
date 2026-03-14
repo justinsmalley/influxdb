@@ -15,7 +15,7 @@ This implementation adds field renaming and soft deletion capabilities to Influx
 ## Architecture
 
 - **Centralized Store**: `FieldMappingStore` manages all field mappings per database
-- **Version-based Internal Naming**: Deleted and re-created fields get versioned internal names (e.g., `temperature.v2`)
+- **Internal naming**: Each mapping is (user name, internal name) only. When a dropped name is re-used, collision avoidance uses a version suffix in the internal name (e.g., `temperature.v2`); there is no separate version or state in the store or on disk.
 - **Atomic Operations**: All field operations use writer-preferred RWMutex
 - **Backward Compatible**: If using unmodified InfluxDB, deleted fields become visible again
 
@@ -55,7 +55,7 @@ go build -ldflags="-s -w" -o influxd ./cmd/influxd
 
 **Compilation Flags:**
 - `GOOS=linux GOARCH=amd64` - Target Linux x86_64 for Docker
-- `CGO_ENнымED=0` - Disable CGO for static binary
+- `CGO_ENABLED=0` - Disable CGO for static binary
 - `-ldflags="-s -w"` - Strip debug symbols and reduce binary size
 
 ### Step 3: Check for Compilation Errors
@@ -158,7 +158,7 @@ docker exec influxdb-modified influx -database testdb -execute \
 # Show mappings
 docker exec influxdb-modified influx -database testdb -execute \
   "SHOW FIELD MAPPINGS FROM environmental_sensors"
-# Should show co2_level with state=DELETED, user_name=null
+# Shows only active mappings (measurement, user_name, internal_name). Dropped fields are not listed.
 ```
 
 ### Test 3: Re-create Deleted Field
@@ -171,9 +171,7 @@ docker exec influxdb-modified influx -database testdb -execute \
 # Show mappings
 docker exec influxdb-modified influx -database testdb -execute \
   "SHOW FIELD MAPPINGS FROM environmental_sensors"
-# Should show:
-# - co2_level (old) -> DELETED
-# - co2_level.v2 (new) -> ACTIVE
+# Should show one active mapping: user_name=co2_level, internal_name=co2_level.v2
 
 # Query should return new data
 docker exec influxdb-modified influx -database testdb -execute \
@@ -219,9 +217,7 @@ docker exec influxdb-modified influx -database fresh_db -execute \
 docker exec influxdb-modified influx -database fresh_db -execute \
   "SHOW FIELD MAPPINGS FROM test"
 
-# Should show:
-# - temperature (internal) -> Air_Temperature (state=DELETED)
-# - temperature (internal) -> temperature.v2 (state=ACTIVE)
+# Should show active mappings only (e.g. temperature -> Air_Temperature; temperature.v2 -> temperature). No state column.
 ```
 
 ### Test 6: Backward Compatibility
@@ -264,11 +260,9 @@ Field mappings are stored in:
 Format: Protobuf `FieldMappingSet` message containing:
 - `Measurements[]` - One entry per measurement
   - `Name` - Measurement name
-  - `Mappings[]` - Field mappings
+  - `Mappings[]` - Field mappings (only active mappings are persisted)
     - `UserName` - User-facing name
-    - `InternalName` - Internal storage name (may have .v2, .v3 suffix)
-    - `Version` - Version number
-    - `State` - ACTIVE, DELETED, or RENAMED
+    - `InternalName` - Internal storage name (may have .v2, .v3 suffix for collision avoidance)
 
 ### View Raw Mapping Data
 
@@ -323,11 +317,11 @@ INSERT environmental_sensors,tag1=value1 Air_Temperature=74.1,humidity=48,pressu
 
 ## Troubleshooting
 
-### Issue: "field is not active (state: X)"
+### Issue: Rename or drop fails (name not found or already in use)
 
-**Cause**: Trying to rename or delete a field that's already been renamed or deleted.
+**Cause**: The name may have been renamed or dropped already; renames require the current user-facing name.
 
-**Solution**: Check field state with `SHOW FIELD MAPPINGS` and use the correct current name.
+**Solution**: Use `SHOW FIELD MAPPINGS` to see current (user_name, internal_name) pairs and use the correct user-facing name.
 
 ### Issue: "database name required"
 
