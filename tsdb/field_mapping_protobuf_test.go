@@ -11,8 +11,6 @@ func TestFieldMappingProtobuf(t *testing.T) {
 	mapping := &internal.FieldMapping{
 		UserName:     "Air_Temperature",
 		InternalName: "temperature",
-		Version:      1,
-		State:        internal.FieldMappingState_ACTIVE,
 	}
 
 	// Create a measurement with the mapping

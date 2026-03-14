@@ -648,7 +648,7 @@ func (r *FloatMovingAverageReducer) AggregateFloat(p *FloatPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window
 func (r *FloatMovingAverageReducer) validPoints() ([]float64, int64) {
-	return calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
+	return calculateMovingAverageFloat(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving average of the current window. Emit should be called
@@ -718,7 +718,7 @@ func (r *IntegerMovingAverageReducer) AggregateInteger(p *IntegerPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window
 func (r *IntegerMovingAverageReducer) validPoints() ([]float64, int64) {
-	return calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
+	return calculateMovingAverageInt(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving average of the current window. Emit should be called
@@ -788,7 +788,7 @@ func (r *UnsignedMovingAverageReducer) AggregateUnsigned(p *UnsignedPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window
 func (r *UnsignedMovingAverageReducer) validPoints() ([]float64, int64) {
-	return calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
+	return calculateMovingAverageUint(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving average of the current window. Emit should be called
@@ -857,7 +857,7 @@ func (r *FloatMovingMedianReducer) AggregateFloat(p *FloatPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window and returns median
 func (r *FloatMovingMedianReducer) validPoints() ([]float64, int64) {
-	return calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
+	return calculateMovingMedianFloat(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving median of the current window. Emit should be called
@@ -926,7 +926,7 @@ func (r *IntegerMovingMedianReducer) AggregateInteger(p *IntegerPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window and returns median
 func (r *IntegerMovingMedianReducer) validPoints() ([]float64, int64) {
-	return calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
+	return calculateMovingMedianInt(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving median of the current window. Emit should be called
@@ -995,7 +995,7 @@ func (r *UnsignedMovingMedianReducer) AggregateUnsigned(p *UnsignedPoint) {
 
 // validPoints filters the buffer to only include points within the valid time window and returns median
 func (r *UnsignedMovingMedianReducer) validPoints() ([]float64, int64) {
-	return calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
+	return calculateMovingMedianUint(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)
 }
 
 // Emit emits the moving median of the current window. Emit should be called

@@ -2406,7 +2406,7 @@ func (e *Engine) translateNamesInOptions(measurement string, opt query.IteratorO
 	if db == "" {
 		return measurement, opt
 	}
-	
+
 	internalMeasurement := measurement
 
 	// Translate measurement name
@@ -2452,7 +2452,7 @@ func (e *Engine) translateExpr(expr influxql.Expr, measurement string, fieldMapp
 	if expr == nil {
 		return nil
 	}
-	
+
 	expr = influxql.CloneExpr(expr)
 	return influxql.RewriteExpr(expr, func(ex influxql.Expr) influxql.Expr {
 		if ref, ok := ex.(*influxql.VarRef); ok {

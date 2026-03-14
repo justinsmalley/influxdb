@@ -60,5 +60,3 @@ require (
 	github.com/willf/bitset v1.1.3 // indirect
 	gonum.org/v1/gonum v0.6.0 // indirect
 )
-
-replace google.golang.org/protobuf => google.golang.org/protobuf v1.28.1

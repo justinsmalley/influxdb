@@ -9,21 +9,11 @@ import (
 	internal "github.com/influxdata/influxdb/tsdb/internal"
 )
 
-type DatabaseMappingState = MappingState
-
-const (
-	DatabaseMappingState_DATABASE_ACTIVE  = MappingStateActive
-	DatabaseMappingState_DATABASE_DELETED = MappingStateDeleted
-	DatabaseMappingState_DATABASE_RENAMED = MappingStateRenamed
-)
-
 type DatabaseMapping = MappingEntry
 
 type DatabaseMappingInfo struct {
 	UserName     string
 	InternalName string
-	Version      int64
-	State        DatabaseMappingState
 }
 
 type DatabaseMappingStore struct {
@@ -92,8 +82,6 @@ func (s *DatabaseMappingStore) GetAllMappings() []*DatabaseMappingInfo {
 		result = append(result, &DatabaseMappingInfo{
 			UserName:     m.UserName,
 			InternalName: m.InternalName,
-			Version:      m.Version,
-			State:        m.State,
 		})
 	}
 	return result
@@ -101,7 +89,7 @@ func (s *DatabaseMappingStore) GetAllMappings() []*DatabaseMappingInfo {
 
 func (s *DatabaseMappingStore) Save() error {
 	return s.MarshalAndSave(false, func() ([]byte, error) {
-		mappings := s.GenericMappingStore.mappings[""]
+		mappings := s.GenericMappingStore.GetAllMappings("")
 		pb := internal.DatabaseMappingSet{
 			Mappings: make([]*internal.DatabaseMapping, 0, len(mappings)),
 		}
@@ -110,8 +98,6 @@ func (s *DatabaseMappingStore) Save() error {
 			pb.Mappings = append(pb.Mappings, &internal.DatabaseMapping{
 				UserName:     mapping.UserName,
 				InternalName: mapping.InternalName,
-				Version:      mapping.Version,
-				State:        internal.DatabaseMappingState(mapping.State),
 			})
 		}
 
@@ -152,8 +138,6 @@ func (s *DatabaseMappingStore) load() error {
 		mappings = append(mappings, &MappingEntry{
 			UserName:     mapping.UserName,
 			InternalName: mapping.InternalName,
-			Version:      mapping.Version,
-			State:        MappingState(mapping.State),
 		})
 	}
 	s.SetMappings("", mappings)

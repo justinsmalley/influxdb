@@ -12,8 +12,6 @@ func TestProtobufSerialization(t *testing.T) {
 	mapping := &internal.FieldMapping{
 		UserName:     "Air_Temperature",
 		InternalName: "temperature",
-		Version:      1,
-		State:        internal.FieldMappingState_ACTIVE,
 	}
 
 	// Create a measurement with the mapping
@@ -42,7 +40,7 @@ func TestProtobufSerialization(t *testing.T) {
 	for i, meas := range fieldSet.Measurements {
 		t.Logf("  Measurement %d: %d fields, %d mappings", i, len(meas.Fields), len(meas.Mappings))
 		for j, mapping := range meas.Mappings {
-			t.Logf("    Mapping %d: %s -> %s (v%d, state %d)", j, mapping.UserName, mapping.InternalName, mapping.Version, mapping.State)
+			t.Logf("    Mapping %d: %s -> %s", j, mapping.UserName, mapping.InternalName)
 		}
 	}
 
@@ -77,14 +75,6 @@ func TestProtobufSerialization(t *testing.T) {
 
 	if m.InternalName != "temperature" {
 		t.Fatalf("Expected InternalName 'temperature', got '%s'", m.InternalName)
-	}
-
-	if m.Version != 1 {
-		t.Fatalf("Expected Version 1, got %d", m.Version)
-	}
-
-	if m.State != internal.FieldMappingState_ACTIVE {
-		t.Fatalf("Expected State ACTIVE, got %d", m.State)
 	}
 
 	t.Log("Protobuf serialization test passed!")

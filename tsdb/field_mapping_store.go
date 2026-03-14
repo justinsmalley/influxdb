@@ -9,22 +9,12 @@ import (
 	internal "github.com/influxdata/influxdb/tsdb/internal"
 )
 
-type FieldMappingState = MappingState
-
-const (
-	FieldMappingState_ACTIVE  = MappingStateActive
-	FieldMappingState_DELETED = MappingStateDeleted
-	FieldMappingState_RENAMED = MappingStateRenamed
-)
-
 type FieldMapping = MappingEntry
 
 type FieldMappingInfo struct {
 	Measurement  string
 	UserName     string
 	InternalName string
-	Version      int64
-	State        FieldMappingState
 }
 
 type FieldMappingStore struct {
@@ -83,30 +73,23 @@ func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldN
 }
 
 func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	var result []*FieldMappingInfo
 
 	if measurement != "" {
-		for _, m := range s.mappings[measurement] {
+		for _, m := range s.GenericMappingStore.GetAllMappings(measurement) {
 			result = append(result, &FieldMappingInfo{
 				Measurement:  measurement,
 				UserName:     m.UserName,
 				InternalName: m.InternalName,
-				Version:      m.Version,
-				State:        m.State,
 			})
 		}
 	} else {
-		for meas, measMappings := range s.mappings {
-			for _, m := range measMappings {
+		for _, meas := range s.GenericMappingStore.GetAllGroups() {
+			for _, m := range s.GenericMappingStore.GetAllMappings(meas) {
 				result = append(result, &FieldMappingInfo{
 					Measurement:  meas,
 					UserName:     m.UserName,
 					InternalName: m.InternalName,
-					Version:      m.Version,
-					State:        m.State,
 				})
 			}
 		}
@@ -117,23 +100,22 @@ func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingIn
 // Save writes the mapping store to disk
 func (s *FieldMappingStore) Save() error {
 	return s.MarshalAndSave(true, func() ([]byte, error) {
+		groups := s.GenericMappingStore.GetAllGroups()
 		pb := internal.FieldMappingSet{
-			Measurements: make([]*internal.FieldMappingMeasurement, 0, len(s.mappings)),
+			Measurements: make([]*internal.FieldMappingMeasurement, 0, len(groups)),
 		}
 
-		for measurement, measMappings := range s.mappings {
+		for _, measurement := range groups {
+			measMappings := s.GenericMappingStore.GetAllMappings(measurement)
 			meas := &internal.FieldMappingMeasurement{
 				Name:     []byte(measurement),
 				Mappings: make([]*internal.FieldMapping, 0, len(measMappings)),
 			}
 
 			for _, mapping := range measMappings {
-				stateVal := internal.FieldMappingState(mapping.State)
 				meas.Mappings = append(meas.Mappings, &internal.FieldMapping{
 					UserName:     mapping.UserName,
 					InternalName: mapping.InternalName,
-					Version:      mapping.Version,
-					State:        stateVal,
 				})
 			}
 			pb.Measurements = append(pb.Measurements, meas)
@@ -175,12 +157,9 @@ func (s *FieldMappingStore) load() error {
 		measurement := string(meas.Name)
 		var measMappings []*MappingEntry
 		for _, mapping := range meas.Mappings {
-			stateVal := MappingState(mapping.State)
 			measMappings = append(measMappings, &MappingEntry{
 				UserName:     mapping.UserName,
 				InternalName: mapping.InternalName,
-				Version:      mapping.Version,
-				State:        stateVal,
 			})
 		}
 		s.SetMappings(measurement, measMappings)

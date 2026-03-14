@@ -13,8 +13,7 @@ echo "Setting up Python virtual environment..."
 python3 -m venv .venv
 source .venv/bin/activate
 
-echo "Building Docker image..."
-# Build the image using Docker Buildx to avoid legacy builder deprecation warnings
+echo "Building Docker image (using cache for unchanged layers)..."
 docker buildx build -f influxdb/Dockerfile.local -t "$IMAGE_NAME" --load .
 
 echo "Cleaning up any existing containers..."

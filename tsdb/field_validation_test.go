@@ -117,24 +117,24 @@ func TestValidateFieldName(t *testing.T) {
 
 		// Version suffix pattern
 		/*
-		{
-			name:        "ends with .v1",
-			fieldName:   "temperature.v1",
-			expectError: true,
-			errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
-		},
-		{
-			name:        "ends with .v2",
-			fieldName:   "temperature.v2",
-			expectError: true,
-			errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
-		},
-		{
-			name:        "ends with .v999",
-			fieldName:   "temperature.v999",
-			expectError: true,
-			errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
-		},
+			{
+				name:        "ends with .v1",
+				fieldName:   "temperature.v1",
+				expectError: true,
+				errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
+			},
+			{
+				name:        "ends with .v2",
+				fieldName:   "temperature.v2",
+				expectError: true,
+				errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
+			},
+			{
+				name:        "ends with .v999",
+				fieldName:   "temperature.v999",
+				expectError: true,
+				errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
+			},
 		*/
 		{
 			name:        "contains .v1 in middle",

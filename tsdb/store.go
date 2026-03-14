@@ -1004,36 +1004,15 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 
 		// Completely remove it from the mapping store instead of soft deleting
 		// This guarantees the name is fully released for recreation
-		store.mu.Lock()
-		if _, exists := store.mappings[""]; exists { // Measurement mappings use a single group ""
-			// Find and remove all mappings with this user name
-			var newMappings []*MappingEntry
-			for _, m := range store.mappings[""] {
-				if m.UserName != name {
-					newMappings = append(newMappings, m)
-				}
-			}
-			store.mappings[""] = newMappings
-			
-			store.mu.Unlock()
-			store.Save() // Save to disk
-		} else {
-			store.mu.Unlock()
-		}
+		store.DropMappingsByInternalName("", internalName)
+		store.Save() // Save to disk
 	}
 
 	// Also completely remove field mappings for this measurement
 	if fieldStore, err := s.FieldMappingStore(database); err == nil {
-		// Field mappings are keyed by MeasurementName
-		fieldStore.mu.Lock()
-		if _, exists := fieldStore.mappings[name]; exists {
-			delete(fieldStore.mappings, name)
-			// Save the updated store to disk
-			fieldStore.mu.Unlock() // Unlock before saving
-			fieldStore.Save()
-		} else {
-			fieldStore.mu.Unlock()
-		}
+		// Field mappings are keyed by internal MeasurementName
+		fieldStore.DropGroup(internalName)
+		fieldStore.Save()
 	}
 
 	// Limit to 1 delete for each shard since expanding the measurement into the list

@@ -27,13 +27,13 @@ func TestFieldMappingStore_RenameDropRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if internalName != "temp1.v2" {
-		t.Fatalf("expected temp1.v2, got %s", internalName)
+	if internalName != "temp1" {
+		t.Fatalf("expected temp1, got %s", internalName)
 	}
 
 	// Verify GetInternalFieldName
-	if name, ok := store.GetInternalFieldName("meas1", "temp1"); !ok || name != "temp1.v2" {
-		t.Fatalf("expected temp1.v2, got %s", name)
+	if name, ok := store.GetInternalFieldName("meas1", "temp1"); !ok || name != "temp1" {
+		t.Fatalf("expected temp1, got %s", name)
 	}
 
 	// 2. Rename temp1 to temperature1
@@ -47,8 +47,8 @@ func TestFieldMappingStore_RenameDropRecreate(t *testing.T) {
 	}
 
 	// New name should point to old internal name
-	if name, ok := store.GetInternalFieldName("meas1", "temperature1"); !ok || name != "temp1.v2" {
-		t.Fatalf("expected temperature1 -> temp1.v2, got %s", name)
+	if name, ok := store.GetInternalFieldName("meas1", "temperature1"); !ok || name != "temp1" {
+		t.Fatalf("expected temperature1 -> temp1, got %s", name)
 	}
 
 	// 3. Drop temperature1
@@ -65,13 +65,13 @@ func TestFieldMappingStore_RenameDropRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if internalName3 != "temperature1.v3" {
-		t.Fatalf("expected temperature1.v3, got %s", internalName3)
+	if internalName3 != "temperature1" {
+		t.Fatalf("expected temperature1, got %s", internalName3)
 	}
 
 	// GetUserFieldNames (tests translation logic for Show Field Keys)
-	userNames := store.GetUserFieldNames("meas1", []string{"temp1.v2", "temperature1.v3", "unmapped_field"})
-	expected := []string{"temp1.v2", "temperature1", "unmapped_field"}
+	userNames := store.GetUserFieldNames("meas1", []string{"temp1", "temperature1", "unmapped_field"})
+	expected := []string{"", "temperature1", "unmapped_field"}
 	if !reflect.DeepEqual(userNames, expected) {
 		t.Fatalf("expected %v, got %v", expected, userNames)
 	}
@@ -82,7 +82,7 @@ func TestFieldMappingStore_RenameDropRecreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if name, ok := store2.GetInternalFieldName("meas1", "temperature1"); !ok || name != "temperature1.v3" {
-		t.Fatalf("expected temperature1 -> temperature1.v3 after reload, got %s", name)
+	if name, ok := store2.GetInternalFieldName("meas1", "temperature1"); !ok || name != "temperature1" {
+		t.Fatalf("expected temperature1 -> temperature1 after reload, got %s", name)
 	}
 }

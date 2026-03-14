@@ -9,21 +9,11 @@ import (
 	internal "github.com/influxdata/influxdb/tsdb/internal"
 )
 
-type MeasurementMappingState = MappingState
-
-const (
-	MeasurementMappingState_MEASUREMENT_ACTIVE  = MappingStateActive
-	MeasurementMappingState_MEASUREMENT_DELETED = MappingStateDeleted
-	MeasurementMappingState_MEASUREMENT_RENAMED = MappingStateRenamed
-)
-
 type MeasurementMapping = MappingEntry
 
 type MeasurementMappingInfo struct {
 	UserName     string
 	InternalName string
-	Version      int64
-	State        MeasurementMappingState
 }
 
 type MeasurementMappingStore struct {
@@ -76,8 +66,6 @@ func (s *MeasurementMappingStore) GetAllMappings() []*MeasurementMappingInfo {
 		result = append(result, &MeasurementMappingInfo{
 			UserName:     m.UserName,
 			InternalName: m.InternalName,
-			Version:      m.Version,
-			State:        m.State,
 		})
 	}
 	return result
@@ -85,7 +73,7 @@ func (s *MeasurementMappingStore) GetAllMappings() []*MeasurementMappingInfo {
 
 func (s *MeasurementMappingStore) Save() error {
 	return s.MarshalAndSave(false, func() ([]byte, error) {
-		mappings := s.GenericMappingStore.mappings[""]
+		mappings := s.GenericMappingStore.GetAllMappings("")
 		pb := internal.MeasurementMappingSet{
 			Mappings: make([]*internal.MeasurementMapping, 0, len(mappings)),
 		}
@@ -94,8 +82,6 @@ func (s *MeasurementMappingStore) Save() error {
 			pb.Mappings = append(pb.Mappings, &internal.MeasurementMapping{
 				UserName:     mapping.UserName,
 				InternalName: mapping.InternalName,
-				Version:      mapping.Version,
-				State:        internal.MeasurementMappingState(mapping.State),
 			})
 		}
 
@@ -136,8 +122,6 @@ func (s *MeasurementMappingStore) load() error {
 		mappings = append(mappings, &MappingEntry{
 			UserName:     mapping.UserName,
 			InternalName: mapping.InternalName,
-			Version:      mapping.Version,
-			State:        MappingState(mapping.State),
 		})
 	}
 	s.SetMappings("", mappings)

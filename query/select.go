@@ -758,7 +758,6 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 		f.Alias = columns[i]
 	}
 
-
 	// Retrieve the refs to retrieve the auxiliary fields.
 	var auxKeys []influxql.VarRef
 	if len(valueMapper.refs) > 0 {

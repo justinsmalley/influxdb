@@ -1,23 +1,29 @@
 # Use InfluxDB 1.7.11 as base for compatibility
 FROM influxdb:1.7.11 as base
 
-# Builder stage with Go 1.20 (compatible with InfluxDB 1.7.11)
-FROM golang:1.20-bullseye AS builder
+# Builder stage with Go 1.13.8 (compatible with InfluxDB 1.7.11)
+FROM golang:1.13.8-alpine AS builder
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y git make bash gcc && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache git make bash gcc musl-dev
+
+WORKDIR /src
+
+# Copy module files first to leverage Docker cache for dependencies
+COPY influxdb/go.mod influxdb/go.sum ./
+COPY influxql/go.mod influxql/go.sum /influxql/
+
+# Download dependencies (this step will be cached unless go.mod/go.sum changes)
+RUN go mod download
 
 # Copy source code
-WORKDIR /src
 COPY influxdb/ .
 
 # Copy the modified influxql package
 COPY influxql/ /influxql
 
 # Build modified InfluxDB
-RUN go mod edit -replace google.golang.org/protobuf=google.golang.org/protobuf@v1.28.1 && \
-    go mod tidy && \
-    CGO_ENABLED=0 go build -ldflags="-s -w" -o /influxd ./cmd/influxd
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /influxd ./cmd/influxd
 
 # Final runtime image based on InfluxDB 1.7.11
 FROM influxdb:1.7.11

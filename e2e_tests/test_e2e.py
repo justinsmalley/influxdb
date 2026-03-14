@@ -14,9 +14,7 @@ def query(q, db=DB_NAME, method="GET"):
     if method == "GET":
         req = urllib.request.Request(f"{API_URL}/query?{data}")
     else:
-        req = urllib.request.Request(
-            f"{API_URL}/query", data=data.encode("utf-8")
-        )
+        req = urllib.request.Request(f"{API_URL}/query", data=data.encode("utf-8"))
 
     try:
         with urllib.request.urlopen(req) as response:
@@ -74,18 +72,14 @@ class TestInfluxDBE2E(unittest.TestCase):
         # 3. Verify SHOW MEASUREMENT MAPPINGS
         mappings_res = query("SHOW MEASUREMENT MAPPINGS", db=DB)
         series = mappings_res.get("results", [{}])[0].get("series", [])
-        self.assertTrue(
-            len(series) > 0, "Expected measurement mappings series"
-        )
+        self.assertTrue(len(series) > 0, "Expected measurement mappings series")
 
         mapping_found = False
         for row in series[0]["values"]:
             if row[0] == "m_test_new" and row[2] == "ACTIVE":
                 mapping_found = True
                 break
-        self.assertTrue(
-            mapping_found, "Mapping for m_test_new should be ACTIVE"
-        )
+        self.assertTrue(mapping_found, "Mapping for m_test_new should be ACTIVE")
 
         # 4. Write new data to the renamed measurement
         write_points(
@@ -260,9 +254,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         # Verify querying C returns all data
         res = query("SELECT * FROM m_c", db=DB)
         values = res["results"][0]["series"][0]["values"]
-        self.assertEqual(
-            len(values), 3, "Expected 3 points under the name m_c"
-        )
+        self.assertEqual(len(values), 3, "Expected 3 points under the name m_c")
 
         # Verify querying A or B returns nothing
         try:
@@ -295,15 +287,10 @@ class TestInfluxDBE2E(unittest.TestCase):
         # 2. Rename to existing
         write_points(["m_d,tag=1 val=40 4000000000"], db=DB)
         # Attempt to rename m_d to m_c, which already exists
-        res = query(
-            "ALTER MEASUREMENT m_d RENAME TO m_c", db=DB, method="POST"
-        )
+        res = query("ALTER MEASUREMENT m_d RENAME TO m_c", db=DB, method="POST")
         if "error" in res.get("results", [{}])[0]:
             err_msg = res["results"][0]["error"]
-            if (
-                "already exists" not in err_msg
-                and "already mapped" not in err_msg
-            ):
+            if "already exists" not in err_msg and "already mapped" not in err_msg:
                 self.fail(f"Unexpected error message: {err_msg}")
         else:
             self.fail("Exception not raised")
@@ -319,9 +306,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         res_new_c = query("SELECT * FROM m_c", db=DB)
         series_c = res_new_c.get("results", [{}])[0].get("series", [])
         values_new_c = series_c[0]["values"] if series_c else []
-        self.assertEqual(
-            len(values_new_c), 1, "Expected 1 point after recreating m_c"
-        )
+        self.assertEqual(len(values_new_c), 1, "Expected 1 point after recreating m_c")
         self.assertEqual(values_new_c[0][2], 50.0, "Expected new value 50.0")
 
     def test_05_rp_and_cq_integration(self):
@@ -342,8 +327,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         # Verify it was created
         rp_res = query("SHOW RETENTION POLICIES", db=DB)
         has_rp1 = any(
-            val[0] == "rp1"
-            for val in rp_res["results"][0]["series"][0]["values"]
+            val[0] == "rp1" for val in rp_res["results"][0]["series"][0]["values"]
         )
         self.assertTrue(
             has_rp1,
@@ -402,8 +386,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         self.assertIn(
             "series",
             res_dest["results"][0],
-            "INTO query should have created dest_meas from the "
-            "renamed src_meas_new",
+            "INTO query should have created dest_meas from the " "renamed src_meas_new",
         )
 
     def test_06_complex_field_renames(self):
@@ -429,9 +412,7 @@ class TestInfluxDBE2E(unittest.TestCase):
 
         res = query("SELECT f_c FROM m1", db=DB)
         values = res["results"][0]["series"][0]["values"]
-        self.assertEqual(
-            len(values), 3, "Expected 3 points under the name f_c"
-        )
+        self.assertEqual(len(values), 3, "Expected 3 points under the name f_c")
 
         # Verify querying old names returns no series/columns
         res_a = query("SELECT f_a FROM m1", db=DB)
@@ -443,9 +424,7 @@ class TestInfluxDBE2E(unittest.TestCase):
                 idx = columns.index("f_a")
                 values_a = [
                     row[idx]
-                    for row in res_a["results"][0]["series"][0].get(
-                        "values", []
-                    )
+                    for row in res_a["results"][0]["series"][0].get("values", [])
                     if row[idx] is not None
                 ]
                 self.assertEqual(
@@ -463,18 +442,13 @@ class TestInfluxDBE2E(unittest.TestCase):
         )
         if "error" in res.get("results", [{}])[0]:
             err_msg = res["results"][0]["error"]
-            if (
-                "already exists" not in err_msg
-                and "already mapped" not in err_msg
-            ):
+            if "already exists" not in err_msg and "already mapped" not in err_msg:
                 self.fail(f"Unexpected error message: {err_msg}")
         else:
             self.fail("Exception not raised")
 
         # 3. Swap names via temporary (a -> tmp, b -> a, tmp -> b)
-        write_points(
-            ["swap_m,tag=1 field_a=1.0,field_b=2.0 5000000000"], db=DB
-        )
+        write_points(["swap_m,tag=1 field_a=1.0,field_b=2.0 5000000000"], db=DB)
         time.sleep(0.5)
 
         query(
@@ -498,9 +472,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         )
         time.sleep(0.5)
 
-        write_points(
-            ["swap_m,tag=1 field_a=3.0,field_b=4.0 6000000000"], db=DB
-        )
+        write_points(["swap_m,tag=1 field_a=3.0,field_b=4.0 6000000000"], db=DB)
         time.sleep(0.5)
 
         res_swap = query("SELECT field_a, field_b FROM swap_m", db=DB)
@@ -518,9 +490,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         cols = series[0]["columns"]
 
         if "field_a" not in cols or "field_b" not in cols:
-            self.fail(
-                f"Missing columns. Expected field_a and field_b, got: {cols}"
-            )
+            self.fail(f"Missing columns. Expected field_a and field_b, got: {cols}")
 
         idx_a = cols.index("field_a")
         idx_b = cols.index("field_b")
@@ -578,15 +548,11 @@ class TestInfluxDBE2E(unittest.TestCase):
         # Verify f_b still exists and works
         res_b = query("SELECT f_b FROM m1", db=DB)
         self.assertIn("series", res_b["results"][0], "f_b should still exist")
-        self.assertEqual(
-            res_b["results"][0]["series"][0]["values"][0][1], 10.0
-        )
+        self.assertEqual(res_b["results"][0]["series"][0]["values"][0][1], 10.0)
 
         # Verify f_a is gone
         res_a = query("SELECT f_a FROM m1", db=DB)
-        self.assertNotIn(
-            "series", res_a["results"][0], "f_a should be deleted"
-        )
+        self.assertNotIn("series", res_a["results"][0], "f_a should be deleted")
 
     def test_08_regex_with_multiple_mappings(self):
         DB = "e2e_db_regex_multi"
@@ -594,9 +560,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         query(f"CREATE DATABASE {DB}", db="", method="POST")
 
         # Write initial data to two fields matching a regex
-        write_points(
-            ["regex_m,tag=1 field_1=10.0,field_2=20.0 1000000000"], db=DB
-        )
+        write_points(["regex_m,tag=1 field_1=10.0,field_2=20.0 1000000000"], db=DB)
         time.sleep(0.5)
 
         # Rename field_1 to something else
@@ -607,9 +571,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         )
 
         # Write new data
-        write_points(
-            ["regex_m,tag=1 other_field=15.0,field_2=25.0 2000000000"], db=DB
-        )
+        write_points(["regex_m,tag=1 other_field=15.0,field_2=25.0 2000000000"], db=DB)
         time.sleep(0.5)
 
         # Query with regex matching /field_.*/
@@ -618,29 +580,22 @@ class TestInfluxDBE2E(unittest.TestCase):
 
         # field_1 should NOT be in the results anymore because its user name is
         # other_field
-        self.assertNotIn(
-            "field_1", cols, "Regex should not match the old user name"
-        )
+        self.assertNotIn("field_1", cols, "Regex should not match the old user name")
         # field_2 should be there
         self.assertIn("field_2", cols, "Regex should match field_2")
         # other_field should not be there because it doesn't match the regex
-        self.assertNotIn(
-            "other_field", cols, "other_field doesn't match the regex"
-        )
+        self.assertNotIn("other_field", cols, "other_field doesn't match the regex")
 
         # Query with regex matching /other_.*/
         res_other = query("SELECT /other_.*/ FROM regex_m", db=DB)
         cols_other = res_other["results"][0]["series"][0]["columns"]
-        self.assertIn(
-            "other_field", cols_other, "Regex should match the new user name"
-        )
+        self.assertIn("other_field", cols_other, "Regex should match the new user name")
 
         values_other = res_other["results"][0]["series"][0]["values"]
         self.assertEqual(
             len(values_other),
             2,
-            "Should return both points for other_field "
-            "(mapped to old field_1)",
+            "Should return both points for other_field " "(mapped to old field_1)",
         )
 
     def test_09_mapping_cache_clear_on_drop_db(self):
@@ -726,9 +681,7 @@ class TestInfluxDBE2E(unittest.TestCase):
             if row[0] == DB_NEW and row[2] == "ACTIVE":
                 mapping_found = True
                 break
-        self.assertTrue(
-            mapping_found, f"Mapping for {DB_NEW} should be ACTIVE"
-        )
+        self.assertTrue(mapping_found, f"Mapping for {DB_NEW} should be ACTIVE")
 
         # 4. Write data using the new database name
         write_points(["m1,tag=1 val=20.0 2000000000"], db=DB_NEW)
@@ -787,7 +740,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         """
         print("\n--- Running test_11_function_alias_collision ---")
         db_name = "test_db_collision"
-        
+
         # Create database
         query(f"CREATE DATABASE {db_name}", db="")
 
@@ -806,9 +759,279 @@ class TestInfluxDBE2E(unittest.TestCase):
         # The column returned should be 'mean', NOT 'foo'.
         columns = series[0]["columns"]
         self.assertIn("mean", columns, "The column name should be 'mean'")
-        self.assertNotIn("foo", columns, "The column name was accidentally translated to 'foo'")
+        self.assertNotIn(
+            "foo", columns, "The column name was accidentally translated to 'foo'"
+        )
 
         query(f"DROP DATABASE {db_name}", db="")
+
+    def test_12_field_ops_on_renamed_measurement(self):
+        """
+        Verify that fields can be renamed and dropped on a measurement that
+        has itself been renamed.
+        """
+        print("\n--- Running test_12_field_ops_on_renamed_measurement ---")
+        DB = "e2e_db_field_renamed_meas"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # 1. Write initial data
+        write_points(["m1,tag=1 f1=10.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        # 2. Rename measurement
+        query("ALTER MEASUREMENT m1 RENAME TO m2", db=DB, method="POST")
+
+        # 3. Rename field on the new measurement name
+        res = query("ALTER MEASUREMENT m2 RENAME FIELD f1 TO f2", db=DB, method="POST")
+        self.assertNotIn(
+            "error",
+            res,
+            "Renaming field on renamed measurement should not error",
+        )
+
+        # 4. Write new data with new field
+        write_points(["m2,tag=1 f2=20.0 2000000000"], db=DB)
+        time.sleep(0.5)
+
+        # Verify data
+        res = query("SELECT f2 FROM m2", db=DB)
+        series = res.get("results", [])[0].get("series", [])
+        self.assertEqual(len(series), 1)
+        self.assertEqual(len(series[0]["values"]), 2)
+
+        # 5. Drop field on renamed measurement
+        res = query("DROP FIELD f2 FROM m2", db=DB, method="POST")
+        self.assertNotIn(
+            "error",
+            res,
+            "Dropping field on renamed measurement should not error",
+        )
+
+        # Verify field is gone
+        res = query("SELECT f2 FROM m2", db=DB)
+        self.assertNotIn(
+            "series", res.get("results", [])[0], "Field f2 should be dropped"
+        )
+
+    def test_13_drop_renamed_measurement_clears_fields(self):
+        """
+        Verify that dropping a measurement correctly resolves the internal name
+        and clears out all associated field mappings completely.
+        """
+        print("\n--- Running test_13_drop_renamed_measurement_clears_fields ---")
+        DB = "e2e_db_drop_renamed_meas_fields"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # 1. Write initial data
+        write_points(["m1,tag=1 f1=10.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        # 2. Rename measurement
+        query("ALTER MEASUREMENT m1 RENAME TO m2", db=DB, method="POST")
+
+        # 3. Drop measurement
+        query("DROP MEASUREMENT m2", db=DB, method="POST")
+
+        # Verify measurement mappings are gone
+        res = query("SHOW MEASUREMENT MAPPINGS", db=DB)
+        series = res.get("results", [])[0].get("series", [])
+
+        if len(series) > 0 and "values" in series[0]:
+            for row in series[0]["values"]:
+                if row[0] in ["m1", "m2"]:
+                    self.fail(f"Measurement mapping for {row[0]} should not exist")
+
+        # Verify field mappings are gone
+        res = query("SHOW FIELD MAPPINGS", db=DB)
+        series = res.get("results", [])[0].get("series", [])
+
+        if len(series) > 0 and "values" in series[0]:
+            for row in series[0]["values"]:
+                if row[1] == "f1":  # f1 was the field
+                    self.fail(
+                        f"Field mapping for {row[1]} should not exist "
+                        "after dropping measurement"
+                    )
+
+    def test_14_garbage_collection_protects_historical_names(self):
+        """
+        Verify that mapping garbage collection does not delete RENAMED
+        mappings, which would incorrectly expose underlying internal names
+        when queried.
+        """
+        print("\n--- Running test_14_garbage_collection_protects_historical_names ---")
+        DB = "e2e_db_gc_historical"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # Write data to f_old
+        write_points(["gc_meas,tag=1 f_old=10.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        # Rename f_old to f_new
+        query(
+            "ALTER MEASUREMENT gc_meas RENAME FIELD f_old TO f_new",
+            db=DB,
+            method="POST",
+        )
+
+        # At this point, f_old is mapped to f_new (ACTIVE) and f_old (RENAMED).
+        # We need to trigger garbage collection. We can do this indirectly by
+        # creating another mapping to force a save(), which triggers GC.
+        write_points(["gc_meas,tag=1 other=5.0 2000000000"], db=DB)
+        query(
+            "ALTER MEASUREMENT gc_meas RENAME FIELD other TO other_new",
+            db=DB,
+            method="POST",
+        )
+
+        # Verify f_old returns NO series data, meaning it's still masked
+        res = query("SELECT f_old FROM gc_meas", db=DB)
+        self.assertNotIn(
+            "series",
+            res.get("results", [])[0],
+            "f_old should be masked and return no data",
+        )
+
+        # Verify f_new returns the data
+        res_new = query("SELECT f_new FROM gc_meas", db=DB)
+        series = res_new.get("results", [])[0].get("series", [])
+        self.assertEqual(len(series), 1)
+        self.assertEqual(series[0]["columns"][1], "f_new")
+
+
+        self.assertEqual(series[0]["columns"][1], "f_new")
+        self.assertEqual(series[0]["values"][0][1], 10.0)
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
+    def test_15_measurement_swap_preserves_fields(self):
+        """
+        Verify that swapping measurement names (m1->tmp, m2->m1, tmp->m2)
+        correctly preserves the distinct field mappings of the underlying
+        internal measurements.
+        """
+        print("\n--- Running test_15_measurement_swap_preserves_fields ---")
+        DB = "e2e_db_meas_swap"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # Write data to m1 with field f_a
+        write_points(["m1,tag=1 f_a=10.0 1000000000"], db=DB)
+
+        # Write data to m2 with field f_b
+        write_points(["m2,tag=1 f_b=20.0 2000000000"], db=DB)
+        time.sleep(0.5)
+
+        # Swap measurements
+        query("ALTER MEASUREMENT m1 RENAME TO m_tmp", db=DB, method="POST")
+        query("ALTER MEASUREMENT m2 RENAME TO m1", db=DB, method="POST")
+        query("ALTER MEASUREMENT m_tmp RENAME TO m2", db=DB, method="POST")
+
+        # Now m1 should have f_b=20.0 (because it's the old m2)
+        res_m1 = query("SELECT * FROM m1", db=DB)
+        cols_m1 = res_m1.get("results", [])[0].get("series", [])[0]["columns"]
+        self.assertIn("f_b", cols_m1, "New m1 should have f_b from old m2")
+        self.assertNotIn("f_a", cols_m1, "New m1 should NOT have f_a")
+
+        # And m2 should have f_a=10.0 (because it's the old m1)
+        res_m2 = query("SELECT * FROM m2", db=DB)
+        cols_m2 = res_m2.get("results", [])[0].get("series", [])[0]["columns"]
+        self.assertIn("f_a", cols_m2, "New m2 should have f_a from old m1")
+        self.assertNotIn("f_b", cols_m2, "New m2 should NOT have f_b")
+
+    def test_16_drop_recreate_measurement_clears_field_history(self):
+        """
+        Verify that dropping a measurement and recreating it with the same name
+        does NOT inherit the field mappings of the old measurement.
+        """
+        print(
+            "\n--- Running test_16_drop_recreate_measurement_clears_field_history ---"
+        )
+        DB = "e2e_db_meas_recreate"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # Write data, rename field
+        write_points(["m_recreate,tag=1 old_field=10.0 1000000000"], db=DB)
+        query(
+            "ALTER MEASUREMENT m_recreate RENAME FIELD old_field TO new_field",
+            db=DB,
+            method="POST",
+        )
+        time.sleep(0.5)
+
+        # Drop measurement
+        query("DROP MEASUREMENT m_recreate", db=DB, method="POST")
+
+        # Recreate measurement by writing new data
+        write_points(["m_recreate,tag=1 new_field=20.0 2000000000"], db=DB)
+        time.sleep(0.5)
+
+        # Because this is a *new* measurement internally (m_recreate.v2),
+        # it should NOT have the old mapping history.
+        # We can verify this by checking that old_field does NOT map to new_field
+        # and checking the internal mappings
+        mappings_res = query("SHOW FIELD MAPPINGS", db=DB)
+        series = mappings_res.get("results", [{}])[0].get("series", [])
+
+        mapping_count = 0
+        for row in series[0]["values"]:
+            if row[0] == "m_recreate":
+                mapping_count += 1
+                self.assertEqual(
+                    row[1],
+                    "new_field",
+                    "Only new_field should exist in mappings",
+                )
+
+        self.assertEqual(
+            mapping_count,
+            1,
+            "Only one mapping should exist for the new measurement",
+        )
+
+    def test_17_full_chain_db_meas_field_rename(self):
+        """
+        Tests renaming a DB, then a measurement within it, then a field,
+        and ensures queries still work across all layers of translation.
+        """
+        print("\n--- Running test_17_full_chain_db_meas_field_rename ---")
+        DB_OLD = "db_old"
+        DB_NEW = "db_new"
+        query(f"DROP DATABASE {DB_OLD}", db="", method="POST")
+        query(f"DROP DATABASE {DB_NEW}", db="", method="POST")
+        query(f"CREATE DATABASE {DB_OLD}", db="", method="POST")
+
+        write_points(["m_old,tag=1 f_old=10.0 1000000000"], db=DB_OLD)
+        time.sleep(0.5)
+
+        # Chain of renames
+        query(
+            f"ALTER DATABASE {DB_OLD} RENAME TO {DB_NEW}",
+            db="",
+            method="POST",
+        )
+        query(
+            "ALTER MEASUREMENT m_old RENAME TO m_new",
+            db=DB_NEW,
+            method="POST",
+        )
+        query(
+            "ALTER MEASUREMENT m_new RENAME FIELD f_old TO f_new",
+            db=DB_NEW,
+            method="POST",
+        )
+
+        # Query all the way through the new names
+        res = query("SELECT f_new FROM m_new", db=DB_NEW)
+        series = res.get("results", [])[0].get("series", [])
+        self.assertEqual(len(series), 1)
+        self.assertEqual(series[0]["columns"][1], "f_new")
+        self.assertEqual(series[0]["values"][0][1], 10.0)
 
 
 if __name__ == "__main__":

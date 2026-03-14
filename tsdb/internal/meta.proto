@@ -32,16 +32,8 @@ message Field {
 }
 
 message FieldMapping {
-  string UserName = 1;        // User-facing name
-  string InternalName = 2;    // Internal storage name (seriesKey#!~#internalName)
-  int64 Version = 3;          // Monotonic version counter
-  FieldMappingState State = 4;
-}
-
-enum FieldMappingState {
-  ACTIVE = 0;
-  DELETED = 1;
-  RENAMED = 2;
+  string UserName = 1;     // User-facing name
+  string InternalName = 2; // Internal storage name (seriesKey#!~#internalName)
 }
 
 message MeasurementFieldSet {
@@ -58,34 +50,18 @@ message FieldMappingMeasurement {
 	repeated FieldMapping Mappings = 2;        // Field mappings for this measurement
 }
 
-enum MeasurementMappingState {
-  MEASUREMENT_ACTIVE = 0;
-  MEASUREMENT_DELETED = 1;
-  MEASUREMENT_RENAMED = 2;
-}
-
 message MeasurementMapping {
   string UserName = 1;
   string InternalName = 2;
-  int64 Version = 3;
-  MeasurementMappingState State = 4;
 }
 
 message MeasurementMappingSet {
   repeated MeasurementMapping Mappings = 1;
 }
 
-enum DatabaseMappingState {
-  DATABASE_ACTIVE = 0;
-  DATABASE_DELETED = 1;
-  DATABASE_RENAMED = 2;
-}
-
 message DatabaseMapping {
   string UserName = 1;
   string InternalName = 2;
-  int64 Version = 3;
-  DatabaseMappingState State = 4;
 }
 
 message DatabaseMappingSet {

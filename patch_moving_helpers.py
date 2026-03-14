@@ -1,4 +1,7 @@
-package query
+import sys
+
+def apply_patch():
+    content = """package query
 
 import (
 	"sort"
@@ -139,3 +142,32 @@ func calculateMovingMedianUint(rTime int64, windowSize, minPeriods int, interval
 	}
 	return []float64{validValues[validCount/2]}, int64(validCount)
 }
+"""
+    with open('query/functions_moving_helpers.go', 'w') as f:
+        f.write(content)
+
+    # Now replace references in query/functions.go
+    with open('query/functions.go', 'r') as f:
+        funcs = f.read()
+
+    funcs = funcs.replace("calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)",
+                        "calculateMovingAverageFloat(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)", 1)
+    funcs = funcs.replace("calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)",
+                        "calculateMovingAverageInt(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)", 1)
+    funcs = funcs.replace("calculateMovingAverage(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)",
+                        "calculateMovingAverageUint(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)", 1)
+
+    funcs = funcs.replace("calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)",
+                        "calculateMovingMedianFloat(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)", 1)
+    funcs = funcs.replace("calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)",
+                        "calculateMovingMedianInt(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)", 1)
+    funcs = funcs.replace("calculateMovingMedian(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)",
+                        "calculateMovingMedianUint(r.time, r.windowSize, r.minPeriods, r.interval, r.timeBuf, r.valueBuf)", 1)
+
+    with open('query/functions.go', 'w') as f:
+        f.write(funcs)
+
+    print("Patched moving helpers to avoid generics")
+
+if __name__ == '__main__':
+    apply_patch()

@@ -625,14 +625,21 @@ func (e *StatementExecutor) DropField(database, measurement, fieldName string) e
 	}
 	database = internalDatabase
 
+	// Map to internal measurement name
+	internalMeasurement := measurement
+	if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
+		if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
+			internalMeasurement = internal
+		}
+	}
+
 	// Get the centralized field mapping store
 	fieldMappingStore, err := store.FieldMappingStore(database)
 	if err != nil {
 		return err
 	}
 
-	// Single operation on centralized store - no shard iteration needed!
-	return fieldMappingStore.SoftDeleteField(measurement, fieldName)
+	return fieldMappingStore.SoftDeleteField(internalMeasurement, fieldName)
 }
 
 // RenameField renames a field in a measurement
@@ -656,7 +663,6 @@ func (e *StatementExecutor) RenameField(database, measurement, oldName, newName 
 	}
 	database = internalDatabase
 
-	/*
 	// Map to internal measurement name
 	internalMeasurement := measurement
 	if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
@@ -664,7 +670,6 @@ func (e *StatementExecutor) RenameField(database, measurement, oldName, newName 
 			internalMeasurement = internal
 		}
 	}
-	*/
 
 	// Get the centralized field mapping store
 	fieldMappingStore, err := store.FieldMappingStore(database)
@@ -675,8 +680,7 @@ func (e *StatementExecutor) RenameField(database, measurement, oldName, newName 
 	// Check if new field name already implicitly exists in any shard.
 	// The mapping store's RenameMapping will handle whether it already explicitly exists (active or inactive).
 
-	// Single operation on centralized store - no shard iteration needed!
-	return fieldMappingStore.RenameField(measurement, oldName, newName)
+	return fieldMappingStore.RenameField(internalMeasurement, oldName, newName)
 }
 
 func (e *StatementExecutor) executeExplainStatement(q *influxql.ExplainStatement, ctx *query.ExecutionContext) (models.Rows, error) {
@@ -1116,7 +1120,7 @@ func (e *StatementExecutor) executeShowDatabasesStatement(q *influxql.ShowDataba
 	}
 
 	row := &models.Row{Name: "databases", Columns: []string{"name"}}
-	
+
 	// Create list of internal names
 	internalNames := make([]string, 0, len(dis))
 	for _, di := range dis {
@@ -1968,31 +1972,10 @@ func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.Sho
 		return mappings[i].UserName < mappings[j].UserName
 	})
 
-	// Build result
-	columns := []string{"measurement", "user_name", "internal_name", "state"}
+	columns := []string{"measurement", "user_name", "internal_name"}
 	values := make([][]interface{}, 0, len(mappings))
-
 	for _, m := range mappings {
-		// Skip RENAMED state entries
-		if m.State == tsdb.FieldMappingState_RENAMED {
-			continue
-		}
-
-		stateStr := "ACTIVE"
-		var userName interface{}
-		if m.State == tsdb.FieldMappingState_DELETED {
-			stateStr = "DELETED"
-			userName = nil // null for deleted fields
-		} else {
-			userName = m.UserName
-		}
-
-		values = append(values, []interface{}{
-			m.Measurement,
-			userName,
-			m.InternalName,
-			stateStr,
-		})
+		values = append(values, []interface{}{m.Measurement, m.UserName, m.InternalName})
 	}
 
 	row := &models.Row{
@@ -2021,28 +2004,10 @@ func (e *StatementExecutor) executeShowDatabaseMappingsStatement(stmt *influxql.
 		return mappings[i].UserName < mappings[j].UserName
 	})
 
-	columns := []string{"user_name", "internal_name", "state"}
+	columns := []string{"user_name", "internal_name"}
 	values := make([][]interface{}, 0, len(mappings))
-
 	for _, m := range mappings {
-		if m.State == tsdb.DatabaseMappingState_DATABASE_RENAMED {
-			continue
-		}
-
-		stateStr := "ACTIVE"
-		var userName interface{}
-		if m.State == tsdb.DatabaseMappingState_DATABASE_DELETED {
-			stateStr = "DELETED"
-			userName = nil // null for deleted fields
-		} else {
-			userName = m.UserName
-		}
-
-		values = append(values, []interface{}{
-			userName,
-			m.InternalName,
-			stateStr,
-		})
+		values = append(values, []interface{}{m.UserName, m.InternalName})
 	}
 
 	row := &models.Row{
@@ -2083,28 +2048,10 @@ func (e *StatementExecutor) executeShowMeasurementMappingsStatement(stmt *influx
 		return mappings[i].UserName < mappings[j].UserName
 	})
 
-	columns := []string{"user_name", "internal_name", "state"}
+	columns := []string{"user_name", "internal_name"}
 	values := make([][]interface{}, 0, len(mappings))
-
 	for _, m := range mappings {
-		if m.State == tsdb.MeasurementMappingState_MEASUREMENT_RENAMED {
-			continue
-		}
-
-		stateStr := "ACTIVE"
-		var userName interface{}
-		if m.State == tsdb.MeasurementMappingState_MEASUREMENT_DELETED {
-			stateStr = "DELETED"
-			userName = nil // null for deleted fields
-		} else {
-			userName = m.UserName
-		}
-
-		values = append(values, []interface{}{
-			userName,
-			m.InternalName,
-			stateStr,
-		})
+		values = append(values, []interface{}{m.UserName, m.InternalName})
 	}
 
 	row := &models.Row{

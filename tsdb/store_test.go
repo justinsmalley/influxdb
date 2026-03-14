@@ -505,6 +505,22 @@ func TestStore_BackupRestoreShard(t *testing.T) {
 			`cpu value=3 20`,
 		)
 
+		// Read data from BEFORE REOPEN
+		m_pre := &influxql.Measurement{Name: "cpu"}
+		itr1, err1 := s0.Shard(100).CreateIterator(context.Background(), m_pre, query.IteratorOptions{
+			Expr:      influxql.MustParseExpr(`value`),
+			Ascending: true,
+			StartTime: influxql.MinTime,
+			EndTime:   influxql.MaxTime,
+		})
+		if err1 != nil {
+			t.Fatal(err1)
+		}
+		if itr1 == nil {
+			t.Fatal("iterator is nil BEFORE REOPEN")
+		}
+		itr1.Close()
+
 		if err := s0.Reopen(); err != nil {
 			t.Fatal(err)
 		}
@@ -533,6 +549,9 @@ func TestStore_BackupRestoreShard(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if itr == nil {
+			t.Fatal("iterator is nil")
 		}
 		defer itr.Close()
 		fitr := itr.(query.FloatIterator)

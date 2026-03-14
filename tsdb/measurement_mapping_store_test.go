@@ -27,13 +27,13 @@ func TestMeasurementMappingStore_RenameDropRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if internalName != "m1.v2" {
-		t.Fatalf("expected m1.v2, got %s", internalName)
+	if internalName != "m1" {
+		t.Fatalf("expected m1, got %s", internalName)
 	}
 
 	// Verify GetInternalMeasurementName
-	if name, ok := store.GetInternalMeasurementName("m1"); !ok || name != "m1.v2" {
-		t.Fatalf("expected m1.v2, got %s", name)
+	if name, ok := store.GetInternalMeasurementName("m1"); !ok || name != "m1" {
+		t.Fatalf("expected m1, got %s", name)
 	}
 
 	// 2. Rename m1 to m1_new
@@ -47,8 +47,8 @@ func TestMeasurementMappingStore_RenameDropRecreate(t *testing.T) {
 	}
 
 	// New name should point to old internal name
-	if name, ok := store.GetInternalMeasurementName("m1_new"); !ok || name != "m1.v2" {
-		t.Fatalf("expected m1_new -> m1.v2, got %s", name)
+	if name, ok := store.GetInternalMeasurementName("m1_new"); !ok || name != "m1" {
+		t.Fatalf("expected m1_new -> m1, got %s", name)
 	}
 
 	// 3. Drop m1_new
@@ -65,18 +65,18 @@ func TestMeasurementMappingStore_RenameDropRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if internalName3 != "m1_new.v3" {
-		t.Fatalf("expected m1_new.v3, got %s", internalName3)
+	if internalName3 != "m1_new" {
+		t.Fatalf("expected m1_new, got %s", internalName3)
 	}
 
 	// GetUserMeasurementNames (tests translation logic for Show Measurements)
-	userNames := store.GetUserMeasurementNames([]string{"m1.v2", "m1_new.v3", "unmapped_meas"})
-	
-	// m1.v2 was m1, then renamed to m1_new, which was then dropped.
-	// So m1.v2 is inactive, but maps to its last known name: m1_new.
-	// The recreated m1_new has internal name m1_new.v3, mapping to m1_new.
-	expected := []string{"m1_new", "m1_new", "unmapped_meas"}
-	
+	userNames := store.GetUserMeasurementNames([]string{"m1", "m1_new", "unmapped_meas"})
+
+	// m1 was m1, then renamed to m1_new, which was then dropped.
+	// So m1 is inactive, but maps to its last known name: m1_new.
+	// The recreated m1_new has internal name m1_new, mapping to m1_new.
+	expected := []string{"", "m1_new", "unmapped_meas"}
+
 	if !reflect.DeepEqual(userNames, expected) {
 		t.Fatalf("expected %v, got %v", expected, userNames)
 	}
@@ -87,7 +87,7 @@ func TestMeasurementMappingStore_RenameDropRecreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if name, ok := store2.GetInternalMeasurementName("m1_new"); !ok || name != "m1_new.v3" {
-		t.Fatalf("expected m1_new -> m1_new.v3 after reload, got %s", name)
+	if name, ok := store2.GetInternalMeasurementName("m1_new"); !ok || name != "m1_new" {
+		t.Fatalf("expected m1_new -> m1_new after reload, got %s", name)
 	}
 }
