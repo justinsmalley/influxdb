@@ -15,7 +15,7 @@ This implementation adds field renaming and soft deletion capabilities to Influx
 ## Architecture
 
 - **Centralized Store**: `FieldMappingStore` manages all field mappings per database
-- **Internal naming**: Each mapping is (user name, internal name) only. When a dropped name is re-used, collision avoidance uses a version suffix in the internal name (e.g., `temperature.v2`); there is no separate version or state in the store or on disk.
+- **Internal naming**: Each mapping is (user name, internal name) only. When a dropped name is re-used, collision avoidance uses a version suffix in the internal name (e.g., `temperature.v2`); there is no separate version or state in the store or on disk. Users are free to create fields whose names end in `.v<N>` (e.g., `temp.v1`); the system handles this transparently by cascading the suffix (e.g., internal name becomes `temp.v1.v2` if needed).
 - **Atomic Operations**: All field operations use writer-preferred RWMutex
 - **Backward Compatible**: If using unmodified InfluxDB, deleted fields become visible again
 

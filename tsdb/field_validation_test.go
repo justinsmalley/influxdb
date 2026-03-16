@@ -115,36 +115,33 @@ func TestValidateFieldName(t *testing.T) {
 			errorMsg:    "field name cannot contain reserved pattern '#!~#'",
 		},
 
-		// Version suffix pattern
-		/*
-			{
-				name:        "ends with .v1",
-				fieldName:   "temperature.v1",
-				expectError: true,
-				errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
-			},
-			{
-				name:        "ends with .v2",
-				fieldName:   "temperature.v2",
-				expectError: true,
-				errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
-			},
-			{
-				name:        "ends with .v999",
-				fieldName:   "temperature.v999",
-				expectError: true,
-				errorMsg:    "field name cannot end with versioning pattern '.v<number>'",
-			},
-		*/
+		// Version suffix pattern — .v<N> names are deliberately allowed.
+		// The mapping layer handles collisions transparently by cascading
+		// internal suffixes (e.g., user "temp.v1" -> internal "temp.v1.v2").
+		{
+			name:        "ends with .v1",
+			fieldName:   "temperature.v1",
+			expectError: false,
+		},
+		{
+			name:        "ends with .v2",
+			fieldName:   "temperature.v2",
+			expectError: false,
+		},
+		{
+			name:        "ends with .v999",
+			fieldName:   "temperature.v999",
+			expectError: false,
+		},
 		{
 			name:        "contains .v1 in middle",
 			fieldName:   "temp.v1.value",
-			expectError: false, // Only checks end of string
+			expectError: false,
 		},
 		{
 			name:        "ends with .v (no number)",
 			fieldName:   "temperature.v",
-			expectError: false, // Regex requires digits after .v
+			expectError: false,
 		},
 
 		// Reserved names
@@ -254,10 +251,11 @@ func TestValidateFieldName_UTF8EdgeCases(t *testing.T) {
 	}
 }
 
-func TestValidateFieldName_RegexPatterns(t *testing.T) {
-	t.Skip("Skipping versioning pattern tests as the validation was relaxed")
-	// Test that our regex correctly identifies versioning patterns
-	versionPatterns := []string{
+func TestValidateFieldName_VersionSuffixAllowed(t *testing.T) {
+	// Version suffix patterns (.v<N>) are deliberately allowed in user field names.
+	// The mapping layer handles collisions transparently by cascading the internal
+	// suffix (e.g., user "temp.v1" maps internally to "temp.v1.v2" if needed).
+	allowedNames := []string{
 		"temp.v1",
 		"temp.v2",
 		"temp.v10",
@@ -265,34 +263,18 @@ func TestValidateFieldName_RegexPatterns(t *testing.T) {
 		"temperature.v1",
 		"a.v1",
 		"_.v1",
+		"temp.v",
+		"temp.v1a",
+		"temp.v1.2",
+		"tempv1",
+		"temp.1",
 	}
 
-	for _, pattern := range versionPatterns {
-		t.Run("version_pattern_"+pattern, func(t *testing.T) {
-			err := ValidateFieldName(pattern)
-			if err == nil {
-				t.Errorf("ValidateFieldName(%q) expected error for version pattern but got nil", pattern)
-			}
-			if !strings.Contains(err.Error(), "versioning pattern") {
-				t.Errorf("ValidateFieldName(%q) expected versioning pattern error but got: %v", pattern, err)
-			}
-		})
-	}
-
-	// Test that similar patterns are NOT caught
-	nonVersionPatterns := []string{
-		"temp.v",    // No number
-		"temp.v1a",  // Letter after number
-		"temp.v1.2", // Additional dot
-		"tempv1",    // No dot
-		"temp.1",    // No 'v'
-	}
-
-	for _, pattern := range nonVersionPatterns {
-		t.Run("non_version_pattern_"+pattern, func(t *testing.T) {
-			err := ValidateFieldName(pattern)
-			if err != nil && strings.Contains(err.Error(), "versioning pattern") {
-				t.Errorf("ValidateFieldName(%q) incorrectly flagged as version pattern: %v", pattern, err)
+	for _, name := range allowedNames {
+		t.Run("allowed_"+name, func(t *testing.T) {
+			err := ValidateFieldName(name)
+			if err != nil {
+				t.Errorf("ValidateFieldName(%q) should be allowed but got error: %v", name, err)
 			}
 		})
 	}

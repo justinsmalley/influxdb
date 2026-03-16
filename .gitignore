@@ -87,3 +87,7 @@ man/*.1.gz
 *.log
 /e2e_tests/__pycache__
 /etc
+
+# binary artifacts (should not be checked in)
+influxd-dev
+influxdb-darwin-amd64

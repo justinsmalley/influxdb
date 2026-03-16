@@ -2,7 +2,6 @@ package tsdb
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -22,9 +21,6 @@ var (
 		"time":       true, // Reserved by InfluxDB
 	}
 )
-
-// internal version suffix regex (e.g., .v1, .v2)
-var versionPattern = regexp.MustCompile(`\.v[1-9][0-9]*$`)
 
 // ValidateFieldName validates a user-provided field name
 func ValidateFieldName(name string) error {
@@ -53,17 +49,11 @@ func ValidateFieldName(name string) error {
 		return fmt.Errorf("field name cannot contain reserved pattern '%s'", InternalDelimiter)
 	}
 
-	// Restrict explicit user version suffixes - but allow internal calls to bypass if needed
-	// (Since we generate these internally, we shouldn't block our own generated names if they get passed back in)
-	// We'll handle this by explicitly checking if it's an internal call, or removing this check
-	// if it's causing issues. For now, let's relax the validation to only block user input where possible.
-	// Actually, the easiest fix is just to remove this regex check from here, and handle it at the API layer if needed,
-	// or accept that users *could* theoretically name a field "foo.v1", but it might conflict with our internal names.
-	// Since our internal names are hidden, if a user explicitly names something "foo.v1", we might map it to "foo.v1.v2" internally.
-	// Let's remove the restriction so tests and internal logic don't trip over it.
-	// if versionPattern.MatchString(name) {
-	// 	return fmt.Errorf("field name cannot end with versioning pattern '.v<number>'")
-	// }
+	// NOTE: Names ending in .v<N> (e.g., "temp.v1") are deliberately allowed.
+	// The mapping layer uses .v<N> suffixes internally for collision avoidance,
+	// but this is transparent to the user. If a user creates a field named
+	// "temp.v1", the system handles it by cascading the internal suffix
+	// (e.g., internal name becomes "temp.v1.v2" if needed).
 
 	// Check for reserved names
 	if reservedFieldNames[name] {
