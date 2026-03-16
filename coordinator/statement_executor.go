@@ -298,13 +298,15 @@ func (e *StatementExecutor) executeCreateDatabaseStatement(stmt *influxql.Create
 
 	internalName := stmt.Name
 	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
-		if mappingStore, err := store.DatabaseMappingStore(); err == nil {
-			if internal, err := mappingStore.CreateDatabaseMapping(stmt.Name); err == nil {
-				internalName = internal
-			} else {
-				return err // e.g. "database already exists"
-			}
+		mappingStore, err := store.DatabaseMappingStore()
+		if err != nil {
+			return fmt.Errorf("failed to access database mapping store: %w", err)
 		}
+		internal, err := mappingStore.CreateDatabaseMapping(stmt.Name)
+		if err != nil {
+			return err
+		}
+		internalName = internal
 	}
 
 	if !stmt.RetentionPolicyCreate {
@@ -382,14 +384,16 @@ func (e *StatementExecutor) executeDropDatabaseStatement(stmt *influxql.DropData
 	internalName := userName
 
 	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
-		if mappingStore, err := store.DatabaseMappingStore(); err == nil {
-			if internal, isActive := mappingStore.GetInternalDatabaseName(userName); isActive {
-				internalName = internal
-			}
-			// Let TSDBStore.DeleteDatabase handle the mapping cleanup.
-			// It will completely remove the database from the mapping store
-			// instead of just soft deleting it, ensuring a clean slate if recreated.
+		mappingStore, err := store.DatabaseMappingStore()
+		if err != nil {
+			return fmt.Errorf("failed to access database mapping store: %w", err)
 		}
+		if internal, isActive := mappingStore.GetInternalDatabaseName(userName); isActive {
+			internalName = internal
+		}
+		// Let TSDBStore.DeleteDatabase handle the mapping cleanup.
+		// It will completely remove the database from the mapping store
+		// instead of just soft deleting it, ensuring a clean slate if recreated.
 	}
 
 	if e.MetaClient.Database(internalName) == nil {
@@ -508,17 +512,19 @@ func (e *StatementExecutor) RenameDatabase(oldName, newName string) error {
 	}
 
 	// Check if new database name implicitly exists
-	if mappingStore, err := store.DatabaseMappingStore(); err == nil {
-		internalNewName, isActive := mappingStore.GetInternalDatabaseName(newName)
-		if isActive && internalNewName == newName {
-			// If it's active and hasn't been remapped, it means it's an implicit mapping.
-			// Check if there's actual data in the meta store for this database.
-			if e.MetaClient != nil && e.MetaClient.Database(newName) != nil {
-				return fmt.Errorf("database %s already exists", newName)
-			}
-		}
-		// The mapping store's RenameMapping will handle checking for inactive/explicit mappings.
+	mappingStore, err := store.DatabaseMappingStore()
+	if err != nil {
+		return fmt.Errorf("failed to access database mapping store: %w", err)
 	}
+	internalNewName, isActive := mappingStore.GetInternalDatabaseName(newName)
+	if isActive && internalNewName == newName {
+		// If it's active and hasn't been remapped, it means it's an implicit mapping.
+		// Check if there's actual data in the meta store for this database.
+		if e.MetaClient != nil && e.MetaClient.Database(newName) != nil {
+			return fmt.Errorf("database %s already exists", newName)
+		}
+	}
+	// The mapping store's RenameMapping will handle checking for inactive/explicit mappings.
 
 	return store.RenameDatabaseMapping(oldName, newName)
 }
@@ -539,13 +545,14 @@ func (e *StatementExecutor) translateDatabaseName(database string) (string, erro
 		return database, nil
 	}
 	mappingStore, err := store.DatabaseMappingStore()
-	if err == nil {
-		internal, isActive := mappingStore.GetInternalDatabaseName(database)
-		if isActive {
-			return internal, nil
-		} else if internal == "" {
-			return "", query.ErrDatabaseNotFound(database)
-		}
+	if err != nil {
+		return "", fmt.Errorf("failed to access database mapping store: %w", err)
+	}
+	internal, isActive := mappingStore.GetInternalDatabaseName(database)
+	if isActive {
+		return internal, nil
+	} else if internal == "" {
+		return "", query.ErrDatabaseNotFound(database)
 	}
 	return database, nil
 }
@@ -627,10 +634,12 @@ func (e *StatementExecutor) DropField(database, measurement, fieldName string) e
 
 	// Map to internal measurement name
 	internalMeasurement := measurement
-	if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
-		if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
-			internalMeasurement = internal
-		}
+	measMappingStore, err := store.MeasurementMappingStore(database)
+	if err != nil {
+		return fmt.Errorf("failed to access measurement mapping store: %w", err)
+	}
+	if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
+		internalMeasurement = internal
 	}
 
 	// Get the centralized field mapping store
@@ -665,10 +674,12 @@ func (e *StatementExecutor) RenameField(database, measurement, oldName, newName 
 
 	// Map to internal measurement name
 	internalMeasurement := measurement
-	if measMappingStore, err := store.MeasurementMappingStore(database); err == nil {
-		if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
-			internalMeasurement = internal
-		}
+	measMappingStore, err := store.MeasurementMappingStore(database)
+	if err != nil {
+		return fmt.Errorf("failed to access measurement mapping store: %w", err)
+	}
+	if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
+		internalMeasurement = internal
 	}
 
 	// Get the centralized field mapping store

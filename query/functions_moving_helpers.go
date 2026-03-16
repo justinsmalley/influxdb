@@ -5,137 +5,151 @@ import (
 	"time"
 )
 
-// Float helpers
-func calculateMovingAverageFloat(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []float64) ([]float64, int64) {
-	if rTime == 0 { return []float64{}, 0 }
-	var validValues []float64
-	if interval == 0 { validValues = valueBuf } else {
-		intervalNS := interval.Nanoseconds()
-		validStart := rTime - (int64(windowSize-1) * intervalNS)
-		validEnd := rTime
-		for i := 0; i < len(valueBuf); i++ {
-			if timeBuf[i] >= validStart && timeBuf[i] <= validEnd { validValues = append(validValues, valueBuf[i]) }
+// filterValidIndices returns the indices of timeBuf entries within the window
+// [rTime - (windowSize-1)*interval, rTime]. If interval is 0, all indices are valid.
+func filterValidIndices(rTime int64, windowSize int, interval time.Duration, timeBuf []int64) []int {
+	n := len(timeBuf)
+	if interval == 0 {
+		indices := make([]int, n)
+		for i := range indices {
+			indices[i] = i
+		}
+		return indices
+	}
+	intervalNS := interval.Nanoseconds()
+	validStart := rTime - (int64(windowSize-1) * intervalNS)
+	var indices []int
+	for i := 0; i < n; i++ {
+		if timeBuf[i] >= validStart && timeBuf[i] <= rTime {
+			indices = append(indices, i)
 		}
 	}
-	validCount := len(validValues)
+	return indices
+}
+
+// computeMedian returns the median of a pre-sorted, non-empty float64 slice.
+func computeMedian(sorted []float64) float64 {
+	n := len(sorted)
+	if n == 1 {
+		return sorted[0]
+	}
+	if n%2 == 0 {
+		lo, hi := sorted[n/2-1], sorted[n/2]
+		return lo + (hi-lo)/2
+	}
+	return sorted[n/2]
+}
+
+// Float helpers
+
+func calculateMovingAverageFloat(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []float64) ([]float64, int64) {
+	if rTime == 0 {
+		return []float64{}, 0
+	}
+	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
+	validCount := len(indices)
+	if validCount == 0 {
+		return []float64{}, 0
+	}
 	if validCount >= minPeriods {
 		sum := 0.0
-		for _, v := range validValues { sum += v }
+		for _, i := range indices {
+			sum += valueBuf[i]
+		}
 		return []float64{sum / float64(validCount)}, int64(validCount)
 	}
 	return []float64{}, int64(validCount)
 }
 
 func calculateMovingMedianFloat(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []float64) ([]float64, int64) {
-	if rTime == 0 { return []float64{}, 0 }
-	var validValues []float64
-	if interval == 0 {
-		for _, v := range valueBuf { validValues = append(validValues, v) }
-	} else {
-		intervalNS := interval.Nanoseconds()
-		validStart := rTime - (int64(windowSize-1) * intervalNS)
-		validEnd := rTime
-		for i := 0; i < len(valueBuf); i++ {
-			if timeBuf[i] >= validStart && timeBuf[i] <= validEnd { validValues = append(validValues, valueBuf[i]) }
-		}
+	if rTime == 0 {
+		return []float64{}, 0
 	}
-	validCount := len(validValues)
-	if validCount < minPeriods { return []float64{}, int64(validCount) }
-	if validCount == 1 { return []float64{validValues[0]}, int64(validCount) }
-	sort.Float64s(validValues)
-	if validCount%2 == 0 {
-		lo, hi := validValues[validCount/2-1], validValues[validCount/2]
-		return []float64{lo + (hi-lo)/2}, int64(validCount)
+	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
+	validCount := len(indices)
+	if validCount < minPeriods {
+		return []float64{}, int64(validCount)
 	}
-	return []float64{validValues[validCount/2]}, int64(validCount)
+	vals := make([]float64, validCount)
+	for j, i := range indices {
+		vals[j] = valueBuf[i]
+	}
+	sort.Float64s(vals)
+	return []float64{computeMedian(vals)}, int64(validCount)
 }
 
 // Int helpers
+
 func calculateMovingAverageInt(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []int64) ([]float64, int64) {
-	if rTime == 0 { return []float64{}, 0 }
-	var validValues []int64
-	if interval == 0 { validValues = valueBuf } else {
-		intervalNS := interval.Nanoseconds()
-		validStart := rTime - (int64(windowSize-1) * intervalNS)
-		validEnd := rTime
-		for i := 0; i < len(valueBuf); i++ {
-			if timeBuf[i] >= validStart && timeBuf[i] <= validEnd { validValues = append(validValues, valueBuf[i]) }
-		}
+	if rTime == 0 {
+		return []float64{}, 0
 	}
-	validCount := len(validValues)
+	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
+	validCount := len(indices)
+	if validCount == 0 {
+		return []float64{}, 0
+	}
 	if validCount >= minPeriods {
 		sum := 0.0
-		for _, v := range validValues { sum += float64(v) }
+		for _, i := range indices {
+			sum += float64(valueBuf[i])
+		}
 		return []float64{sum / float64(validCount)}, int64(validCount)
 	}
 	return []float64{}, int64(validCount)
 }
 
 func calculateMovingMedianInt(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []int64) ([]float64, int64) {
-	if rTime == 0 { return []float64{}, 0 }
-	var validValues []float64
-	if interval == 0 {
-		for _, v := range valueBuf { validValues = append(validValues, float64(v)) }
-	} else {
-		intervalNS := interval.Nanoseconds()
-		validStart := rTime - (int64(windowSize-1) * intervalNS)
-		validEnd := rTime
-		for i := 0; i < len(valueBuf); i++ {
-			if timeBuf[i] >= validStart && timeBuf[i] <= validEnd { validValues = append(validValues, float64(valueBuf[i])) }
-		}
+	if rTime == 0 {
+		return []float64{}, 0
 	}
-	validCount := len(validValues)
-	if validCount < minPeriods { return []float64{}, int64(validCount) }
-	if validCount == 1 { return []float64{validValues[0]}, int64(validCount) }
-	sort.Float64s(validValues)
-	if validCount%2 == 0 {
-		lo, hi := validValues[validCount/2-1], validValues[validCount/2]
-		return []float64{lo + (hi-lo)/2}, int64(validCount)
+	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
+	validCount := len(indices)
+	if validCount < minPeriods {
+		return []float64{}, int64(validCount)
 	}
-	return []float64{validValues[validCount/2]}, int64(validCount)
+	vals := make([]float64, validCount)
+	for j, i := range indices {
+		vals[j] = float64(valueBuf[i])
+	}
+	sort.Float64s(vals)
+	return []float64{computeMedian(vals)}, int64(validCount)
 }
 
 // Uint helpers
+
 func calculateMovingAverageUint(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []uint64) ([]float64, int64) {
-	if rTime == 0 { return []float64{}, 0 }
-	var validValues []uint64
-	if interval == 0 { validValues = valueBuf } else {
-		intervalNS := interval.Nanoseconds()
-		validStart := rTime - (int64(windowSize-1) * intervalNS)
-		validEnd := rTime
-		for i := 0; i < len(valueBuf); i++ {
-			if timeBuf[i] >= validStart && timeBuf[i] <= validEnd { validValues = append(validValues, valueBuf[i]) }
-		}
+	if rTime == 0 {
+		return []float64{}, 0
 	}
-	validCount := len(validValues)
+	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
+	validCount := len(indices)
+	if validCount == 0 {
+		return []float64{}, 0
+	}
 	if validCount >= minPeriods {
 		sum := 0.0
-		for _, v := range validValues { sum += float64(v) }
+		for _, i := range indices {
+			sum += float64(valueBuf[i])
+		}
 		return []float64{sum / float64(validCount)}, int64(validCount)
 	}
 	return []float64{}, int64(validCount)
 }
 
 func calculateMovingMedianUint(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []uint64) ([]float64, int64) {
-	if rTime == 0 { return []float64{}, 0 }
-	var validValues []float64
-	if interval == 0 {
-		for _, v := range valueBuf { validValues = append(validValues, float64(v)) }
-	} else {
-		intervalNS := interval.Nanoseconds()
-		validStart := rTime - (int64(windowSize-1) * intervalNS)
-		validEnd := rTime
-		for i := 0; i < len(valueBuf); i++ {
-			if timeBuf[i] >= validStart && timeBuf[i] <= validEnd { validValues = append(validValues, float64(valueBuf[i])) }
-		}
+	if rTime == 0 {
+		return []float64{}, 0
 	}
-	validCount := len(validValues)
-	if validCount < minPeriods { return []float64{}, int64(validCount) }
-	if validCount == 1 { return []float64{validValues[0]}, int64(validCount) }
-	sort.Float64s(validValues)
-	if validCount%2 == 0 {
-		lo, hi := validValues[validCount/2-1], validValues[validCount/2]
-		return []float64{lo + (hi-lo)/2}, int64(validCount)
+	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
+	validCount := len(indices)
+	if validCount < minPeriods {
+		return []float64{}, int64(validCount)
 	}
-	return []float64{validValues[validCount/2]}, int64(validCount)
+	vals := make([]float64, validCount)
+	for j, i := range indices {
+		vals[j] = float64(valueBuf[i])
+	}
+	sort.Float64s(vals)
+	return []float64{computeMedian(vals)}, int64(validCount)
 }

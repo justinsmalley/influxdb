@@ -234,6 +234,15 @@ func (s *Store) Open() error {
 		return err
 	}
 
+	// Reconcile mapping stores with actual data on disk. This ensures that
+	// databases, measurements, and fields that exist in data files (e.g., from
+	// a backup restore or offline tool) but are missing from the mapping stores
+	// get identity mappings created for them.
+	if err := s.reconcileMappings(); err != nil {
+		s.Logger.Warn("Failed to reconcile mappings on startup", zap.Error(err))
+		// Non-fatal: mappings will be created on first write anyway.
+	}
+
 	s.opened = true
 
 	if !s.EngineOptions.MonitorDisabled {
@@ -902,17 +911,27 @@ func (s *Store) DeleteDatabase(name string) error {
 	// Remove shared index for database if using inmem index.
 	delete(s.indexes, name)
 
-	// Remove field and measurement mapping stores from cache
+	// Remove field and measurement mapping stores from cache and disk
 	s.fieldMappingMu.Lock()
 	if store, exists := s.fieldMappingStores[name]; exists {
-		os.Remove(store.path) // Remove mapping file from disk
+		if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
+			s.fieldMappingMu.Unlock()
+			s.Logger.Error("failed to remove field mapping file", zap.String("path", store.path), zap.Error(err))
+			return err
+		}
+		os.Remove(store.path + ".bak") // Remove backup if present
 		delete(s.fieldMappingStores, name)
 	}
 	s.fieldMappingMu.Unlock()
 
 	s.measurementMappingMu.Lock()
 	if store, exists := s.measurementMappingStores[name]; exists {
-		os.Remove(store.path) // Remove mapping file from disk
+		if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
+			s.measurementMappingMu.Unlock()
+			s.Logger.Error("failed to remove measurement mapping file", zap.String("path", store.path), zap.Error(err))
+			return err
+		}
+		os.Remove(store.path + ".bak") // Remove backup if present
 		delete(s.measurementMappingStores, name)
 	}
 	s.measurementMappingMu.Unlock()
@@ -2250,4 +2269,109 @@ func (s *Store) MeasurementMappingStore(database string) (*MeasurementMappingSto
 
 	s.measurementMappingStores[database] = store
 	return store, nil
+}
+
+// reconcileMappings ensures that every database, measurement, and field that
+// exists in the loaded shards has a corresponding mapping entry. This handles
+// cases where data files were modified externally (e.g., backup restore,
+// offline import tools) without going through the normal write path.
+//
+// Only identity mappings (name -> name) are created for unmapped entities.
+// Existing mappings (including renames) are never modified.
+func (s *Store) reconcileMappings() error {
+	// 1. Reconcile databases
+	dbMappingStore, err := s.DatabaseMappingStore()
+	if err != nil {
+		return fmt.Errorf("reconcile: failed to open database mapping store: %v", err)
+	}
+
+	for dbName := range s.databases {
+		if _, found := dbMappingStore.GetInternalDatabaseName(dbName); !found {
+			if _, err := dbMappingStore.CreateDatabaseMapping(dbName); err != nil {
+				s.Logger.Warn("reconcile: failed to create database mapping",
+					zap.String("database", dbName), zap.Error(err))
+			} else {
+				s.Logger.Info("reconcile: created identity mapping for database",
+					zap.String("database", dbName))
+			}
+		}
+	}
+
+	// 2. Reconcile measurements and fields per database
+	for dbName := range s.databases {
+		shards := s.filterShards(byDatabase(dbName))
+		if len(shards) == 0 {
+			continue
+		}
+
+		measMappingStore, err := s.MeasurementMappingStore(dbName)
+		if err != nil {
+			s.Logger.Warn("reconcile: failed to open measurement mapping store",
+				zap.String("database", dbName), zap.Error(err))
+			continue
+		}
+
+		fieldMappingStore, err := s.FieldMappingStore(dbName)
+		if err != nil {
+			s.Logger.Warn("reconcile: failed to open field mapping store",
+				zap.String("database", dbName), zap.Error(err))
+			continue
+		}
+
+		// Collect all measurement names from shard indexes
+		measSeen := make(map[string]bool)
+		for _, sh := range shards {
+			engine, err := sh.Engine()
+			if err != nil {
+				continue
+			}
+
+			mfs := engine.MeasurementFieldSet()
+			if mfs == nil {
+				continue
+			}
+
+			// Get measurement names from the field set (these are internal names)
+			mfs.ForEachMeasurement(func(name []byte, mf *MeasurementFields) {
+				measName := string(name)
+				if measSeen[measName] {
+					return
+				}
+				measSeen[measName] = true
+
+				// Reconcile measurement mapping
+				if _, found := measMappingStore.GetInternalMeasurementName(measName); !found {
+					if _, err := measMappingStore.CreateMeasurementMappingDeferred(measName); err != nil {
+						s.Logger.Warn("reconcile: failed to create measurement mapping",
+							zap.String("database", dbName),
+							zap.String("measurement", measName), zap.Error(err))
+					}
+				}
+
+				// Reconcile field mappings
+				for _, fieldKey := range mf.FieldKeys() {
+					if _, found := fieldMappingStore.GetInternalFieldName(measName, fieldKey); !found {
+						if _, err := fieldMappingStore.CreateFieldMappingDeferred(measName, fieldKey); err != nil {
+							s.Logger.Warn("reconcile: failed to create field mapping",
+								zap.String("database", dbName),
+								zap.String("measurement", measName),
+								zap.String("field", fieldKey), zap.Error(err))
+						}
+					}
+				}
+			})
+		}
+
+		// Flush deferred saves
+		if err := measMappingStore.SaveIfDirty(); err != nil {
+			s.Logger.Warn("reconcile: failed to save measurement mappings",
+				zap.String("database", dbName), zap.Error(err))
+		}
+		if err := fieldMappingStore.SaveIfDirty(); err != nil {
+			s.Logger.Warn("reconcile: failed to save field mappings",
+				zap.String("database", dbName), zap.Error(err))
+		}
+	}
+
+	return nil
 }

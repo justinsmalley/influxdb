@@ -15,7 +15,10 @@ This implementation adds field renaming and soft deletion capabilities to Influx
 ## Architecture
 
 - **Centralized Store**: `FieldMappingStore` manages all field mappings per database
+- **Dense Mapping**: Every field, measurement, and database gets a mapping entry on first write, not just renamed or dropped ones. This is required because collision detection (e.g., assigning `.v2` suffixes) depends on knowing all occupied internal name slots. For an unrenamed field, the mapping is an identity entry (`temp -> temp`). The same dense approach applies to measurement and database mapping stores.
 - **Internal naming**: Each mapping is (user name, internal name) only. When a dropped name is re-used, collision avoidance uses a version suffix in the internal name (e.g., `temperature.v2`); there is no separate version or state in the store or on disk. Users are free to create fields whose names end in `.v<N>` (e.g., `temp.v1`); the system handles this transparently by cascading the suffix (e.g., internal name becomes `temp.v1.v2` if needed).
+- **Batched Saves**: During write batches, new mapping entries are created in-memory without immediate disk writes. A single flush to disk occurs at the end of the batch, reducing N disk writes per batch to at most 1 per mapping store.
+- **Backup-on-Save**: Each save rotates one rolling `.bak` backup. On load, if the primary file is corrupt, the store falls back to the backup automatically.
 - **Atomic Operations**: All field operations use writer-preferred RWMutex
 - **Backward Compatible**: If using unmodified InfluxDB, deleted fields become visible again
 

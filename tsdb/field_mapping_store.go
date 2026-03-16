@@ -1,10 +1,6 @@
 package tsdb
 
 import (
-	"io/ioutil"
-	"os"
-	"path/filepath"
-
 	"github.com/gogo/protobuf/proto"
 	internal "github.com/influxdata/influxdb/tsdb/internal"
 )
@@ -68,6 +64,24 @@ func (s *FieldMappingStore) CreateFieldMapping(measurement, userName string) (st
 	return name, s.Save()
 }
 
+// CreateFieldMappingDeferred creates the in-memory mapping but does not save to disk.
+// Call SaveIfDirty after the batch completes to flush changes.
+func (s *FieldMappingStore) CreateFieldMappingDeferred(measurement, userName string) (string, error) {
+	if err := ValidateFieldName(userName); err != nil {
+		return "", err
+	}
+	return s.CreateMappingDeferred(measurement, userName)
+}
+
+// SaveIfDirty writes to disk only if in-memory state has changed since last save.
+func (s *FieldMappingStore) SaveIfDirty() error {
+	if !s.IsDirty() {
+		return nil
+	}
+	s.ClearDirty()
+	return s.Save()
+}
+
 func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldNames []string) []string {
 	return s.GetUserNames(measurement, internalFieldNames)
 }
@@ -99,71 +113,55 @@ func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingIn
 
 // Save writes the mapping store to disk
 func (s *FieldMappingStore) Save() error {
-	return s.MarshalAndSave(true, func() ([]byte, error) {
-		groups := s.GenericMappingStore.GetAllGroups()
-		pb := internal.FieldMappingSet{
-			Measurements: make([]*internal.FieldMappingMeasurement, 0, len(groups)),
-		}
-
-		for _, measurement := range groups {
-			measMappings := s.GenericMappingStore.GetAllMappings(measurement)
-			meas := &internal.FieldMappingMeasurement{
-				Name:     []byte(measurement),
-				Mappings: make([]*internal.FieldMapping, 0, len(measMappings)),
+	return s.MarshalAndSave(
+		func() ([]byte, error) {
+			groups := s.GenericMappingStore.getAllGroupsLocked()
+			pb := internal.FieldMappingSet{
+				Measurements: make([]*internal.FieldMappingMeasurement, 0, len(groups)),
 			}
 
-			for _, mapping := range measMappings {
-				meas.Mappings = append(meas.Mappings, &internal.FieldMapping{
+			for _, measurement := range groups {
+				measMappings := s.GenericMappingStore.getAllMappingsLocked(measurement)
+				meas := &internal.FieldMappingMeasurement{
+					Name:     []byte(measurement),
+					Mappings: make([]*internal.FieldMapping, 0, len(measMappings)),
+				}
+
+				for _, mapping := range measMappings {
+					meas.Mappings = append(meas.Mappings, &internal.FieldMapping{
+						UserName:     mapping.UserName,
+						InternalName: mapping.InternalName,
+					})
+				}
+				pb.Measurements = append(pb.Measurements, meas)
+			}
+
+			return proto.Marshal(&pb)
+		},
+		func(b []byte) error {
+			var pb internal.FieldMappingSet
+			return proto.Unmarshal(b, &pb)
+		},
+	)
+}
+
+func (s *FieldMappingStore) load() error {
+	return s.loadFromDisk(func(b []byte) error {
+		var pb internal.FieldMappingSet
+		if err := proto.Unmarshal(b, &pb); err != nil {
+			return err
+		}
+		for _, meas := range pb.Measurements {
+			measurement := string(meas.Name)
+			var measMappings []*MappingEntry
+			for _, mapping := range meas.Mappings {
+				measMappings = append(measMappings, &MappingEntry{
 					UserName:     mapping.UserName,
 					InternalName: mapping.InternalName,
 				})
 			}
-			pb.Measurements = append(pb.Measurements, meas)
+			s.SetMappings(measurement, measMappings)
 		}
-
-		return proto.Marshal(&pb)
-	})
-}
-
-func (s *FieldMappingStore) load() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0777); err != nil {
-		return err
-	}
-
-	f, err := os.Open(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer f.Close()
-
-	b, err := ioutil.ReadAll(f)
-	if err != nil {
-		return err
-	}
-
-	if len(b) == 0 {
 		return nil
-	}
-
-	var pb internal.FieldMappingSet
-	if err := proto.Unmarshal(b, &pb); err != nil {
-		return err
-	}
-
-	for _, meas := range pb.Measurements {
-		measurement := string(meas.Name)
-		var measMappings []*MappingEntry
-		for _, mapping := range meas.Mappings {
-			measMappings = append(measMappings, &MappingEntry{
-				UserName:     mapping.UserName,
-				InternalName: mapping.InternalName,
-			})
-		}
-		s.SetMappings(measurement, measMappings)
-	}
-
-	return nil
+	})
 }

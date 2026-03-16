@@ -577,6 +577,18 @@ func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
 	} else if arg1.Val <= 1 {
 		return fmt.Errorf("moving_average window must be greater than 1, got %d", arg1.Val)
 	}
+
+	// Validate optional minPeriods (3rd argument)
+	if len(args) >= 3 {
+		arg2, ok := args[2].(*influxql.IntegerLiteral)
+		if !ok {
+			return fmt.Errorf("third argument for moving_average must be an integer, got %T", args[2])
+		}
+		if arg2.Val < 1 {
+			return fmt.Errorf("moving_average minPeriods must be at least 1, got %d", arg2.Val)
+		}
+	}
+
 	c.global.OnlySelectors = false
 
 	// Calculate ExtraIntervals based on center flag
@@ -618,6 +630,18 @@ func (c *compiledField) compileMovingMedian(args []influxql.Expr) error {
 	} else if arg1.Val <= 1 {
 		return fmt.Errorf("moving_median window must be greater than 1, got %d", arg1.Val)
 	}
+
+	// Validate optional minPeriods (3rd argument)
+	if len(args) >= 3 {
+		arg2, ok := args[2].(*influxql.IntegerLiteral)
+		if !ok {
+			return fmt.Errorf("third argument for moving_median must be an integer, got %T", args[2])
+		}
+		if arg2.Val < 1 {
+			return fmt.Errorf("moving_median minPeriods must be at least 1, got %d", arg2.Val)
+		}
+	}
+
 	c.global.OnlySelectors = false
 
 	// Calculate ExtraIntervals based on center flag

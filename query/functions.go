@@ -612,7 +612,6 @@ type FloatMovingAverageReducer struct {
 	minPeriods int
 	center     bool
 	interval   time.Duration
-	sum        float64
 	time       int64
 	valueBuf   []float64
 	timeBuf    []int64
@@ -682,7 +681,6 @@ type IntegerMovingAverageReducer struct {
 	minPeriods int
 	center     bool
 	interval   time.Duration
-	sum        int64
 	time       int64
 	valueBuf   []int64
 	timeBuf    []int64
@@ -752,7 +750,6 @@ type UnsignedMovingAverageReducer struct {
 	minPeriods int
 	center     bool
 	interval   time.Duration
-	sum        uint64
 	time       int64
 	valueBuf   []uint64
 	timeBuf    []int64

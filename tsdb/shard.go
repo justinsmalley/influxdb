@@ -557,11 +557,15 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 	// Check if keys should be unicode validated.
 	validateKeys := s.options.Config.ValidateKeys
 
+	// Per-batch cache for field mapping lookups: measurement -> (userName -> FieldMappingInfo).
+	// Avoids redundant GetAllMappings calls for the same measurement across points in this batch.
+	fieldMappingCache := make(map[string]map[string]*FieldMappingInfo)
+
 	var j int
 	translatedPoints := make([]models.Point, len(points))
 	for i, p := range points {
 		// Translate field and measurement names using mappings FIRST
-		translatedPoint, err := s.translateNames(p)
+		translatedPoint, err := s.translateNames(p, fieldMappingCache)
 		if err != nil {
 			return nil, nil, fmt.Errorf("name translation failed: %v", err)
 		}
@@ -701,6 +705,20 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		}
 	}
 
+	// Flush any deferred mapping saves (at most 1 disk write per store for the entire batch).
+	if s.store != nil {
+		if measMappingStore, storeErr := s.store.MeasurementMappingStore(s.database); storeErr == nil {
+			if flushErr := measMappingStore.SaveIfDirty(); flushErr != nil {
+				return nil, nil, fmt.Errorf("flush measurement mappings: %v", flushErr)
+			}
+		}
+		if fieldMappingStore, storeErr := s.store.FieldMappingStore(s.database); storeErr == nil {
+			if flushErr := fieldMappingStore.SaveIfDirty(); flushErr != nil {
+				return nil, nil, fmt.Errorf("flush field mappings: %v", flushErr)
+			}
+		}
+	}
+
 	if dropped > 0 {
 		err = PartialWriteError{Reason: reason, Dropped: dropped}
 	}
@@ -709,7 +727,16 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 }
 
 // translateNames translates user-facing measurement and field names to internal names using mapping stores.
-func (s *Shard) translateNames(point models.Point) (models.Point, error) {
+// fieldMappingCache is a per-batch cache that avoids redundant GetAllMappings calls for the same measurement.
+//
+// TOCTOU note: There is a small race window between GetInternalMeasurementName() and
+// CreateMeasurementMappingDeferred() (and similarly for fields). If a concurrent rename
+// happens between these calls, a new identity mapping may be created under a name that is
+// about to be renamed. This is acceptable because: (1) renames are rare DDL operations,
+// (2) CreateMapping is idempotent, so the worst case is a mapping created under the
+// old name that self-corrects on the next write, and (3) a broader lock that blocks
+// all writes during renames would harm write throughput for negligible correctness gain.
+func (s *Shard) translateNames(point models.Point, fieldMappingCache map[string]map[string]*FieldMappingInfo) (models.Point, error) {
 	if s.store == nil {
 		// No store reference - skip translation
 		return point, nil
@@ -727,8 +754,8 @@ func (s *Shard) translateNames(point models.Point) (models.Point, error) {
 
 	internalName, isActive := measMappingStore.GetInternalMeasurementName(measurement)
 	if !isActive {
-		// Measurement mapping exists but is not active
-		internalName, err = measMappingStore.CreateMeasurementMapping(measurement)
+		// Measurement not yet mapped — create deferred (no disk write until batch flush)
+		internalName, err = measMappingStore.CreateMeasurementMappingDeferred(measurement)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create measurement mapping for %s: %w", measurement, err)
 		}
@@ -753,11 +780,15 @@ func (s *Shard) translateNames(point models.Point) (models.Point, error) {
 	needsFieldTranslation := false
 	translatedFields := make(models.Fields, len(fields))
 
-	// GetAllMappings returns only active mappings (1-1, no history).
-	mappings := fieldMappingStore.GetAllMappings(internalMeasurement)
-	mappingDict := make(map[string]*FieldMappingInfo)
-	for _, m := range mappings {
-		mappingDict[m.UserName] = m
+	// Use per-batch cache to avoid redundant GetAllMappings calls for the same measurement.
+	mappingDict, cached := fieldMappingCache[internalMeasurement]
+	if !cached {
+		mappings := fieldMappingStore.GetAllMappings(internalMeasurement)
+		mappingDict = make(map[string]*FieldMappingInfo, len(mappings))
+		for _, m := range mappings {
+			mappingDict[m.UserName] = m
+		}
+		fieldMappingCache[internalMeasurement] = mappingDict
 	}
 
 	for fieldName, value := range fields {
@@ -765,8 +796,8 @@ func (s *Shard) translateNames(point models.Point) (models.Point, error) {
 		if m, ok := mappingDict[fieldName]; ok {
 			internalName = m.InternalName
 		} else {
-			// Not in map: never mapped or was dropped. CreateMapping returns existing or allocates new (e.g. .v2).
-			internalName, err = fieldMappingStore.CreateFieldMapping(internalMeasurement, fieldName)
+			// Not in map: never mapped or was dropped. CreateMapping deferred (no disk write until batch flush).
+			internalName, err = fieldMappingStore.CreateFieldMappingDeferred(internalMeasurement, fieldName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create field mapping for %s: %w", fieldName, err)
 			}
@@ -1909,6 +1940,16 @@ func (fs *MeasurementFieldSet) IsEmpty() bool {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 	return len(fs.fields) == 0
+}
+
+// ForEachMeasurement calls fn for each measurement and its fields.
+// The callback receives the measurement name and the MeasurementFields.
+func (fs *MeasurementFieldSet) ForEachMeasurement(fn func(name []byte, mf *MeasurementFields)) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	for name, mf := range fs.fields {
+		fn([]byte(name), mf)
+	}
 }
 
 func (fs *MeasurementFieldSet) Save() error {

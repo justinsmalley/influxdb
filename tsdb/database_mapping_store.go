@@ -1,10 +1,6 @@
 package tsdb
 
 import (
-	"io/ioutil"
-	"os"
-	"path/filepath"
-
 	"github.com/gogo/protobuf/proto"
 	internal "github.com/influxdata/influxdb/tsdb/internal"
 )
@@ -88,59 +84,43 @@ func (s *DatabaseMappingStore) GetAllMappings() []*DatabaseMappingInfo {
 }
 
 func (s *DatabaseMappingStore) Save() error {
-	return s.MarshalAndSave(false, func() ([]byte, error) {
-		mappings := s.GenericMappingStore.GetAllMappings("")
-		pb := internal.DatabaseMappingSet{
-			Mappings: make([]*internal.DatabaseMapping, 0, len(mappings)),
-		}
+	return s.MarshalAndSave(
+		func() ([]byte, error) {
+			mappings := s.GenericMappingStore.getAllMappingsLocked("")
+			pb := internal.DatabaseMappingSet{
+				Mappings: make([]*internal.DatabaseMapping, 0, len(mappings)),
+			}
 
-		for _, mapping := range mappings {
-			pb.Mappings = append(pb.Mappings, &internal.DatabaseMapping{
-				UserName:     mapping.UserName,
-				InternalName: mapping.InternalName,
-			})
-		}
+			for _, mapping := range mappings {
+				pb.Mappings = append(pb.Mappings, &internal.DatabaseMapping{
+					UserName:     mapping.UserName,
+					InternalName: mapping.InternalName,
+				})
+			}
 
-		return proto.Marshal(&pb)
-	})
+			return proto.Marshal(&pb)
+		},
+		func(b []byte) error {
+			var pb internal.DatabaseMappingSet
+			return proto.Unmarshal(b, &pb)
+		},
+	)
 }
 
 func (s *DatabaseMappingStore) load() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0777); err != nil {
-		return err
-	}
-
-	f, err := os.Open(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	return s.loadFromDisk(func(b []byte) error {
+		var pb internal.DatabaseMappingSet
+		if err := proto.Unmarshal(b, &pb); err != nil {
+			return err
 		}
-		return err
-	}
-	defer f.Close()
-
-	b, err := ioutil.ReadAll(f)
-	if err != nil {
-		return err
-	}
-
-	if len(b) == 0 {
+		var mappings []*MappingEntry
+		for _, m := range pb.Mappings {
+			mappings = append(mappings, &MappingEntry{
+				UserName:     m.UserName,
+				InternalName: m.InternalName,
+			})
+		}
+		s.SetMappings("", mappings)
 		return nil
-	}
-
-	var pb internal.DatabaseMappingSet
-	if err := proto.Unmarshal(b, &pb); err != nil {
-		return err
-	}
-
-	var mappings []*MappingEntry
-	for _, mapping := range pb.Mappings {
-		mappings = append(mappings, &MappingEntry{
-			UserName:     mapping.UserName,
-			InternalName: mapping.InternalName,
-		})
-	}
-	s.SetMappings("", mappings)
-
-	return nil
+	})
 }

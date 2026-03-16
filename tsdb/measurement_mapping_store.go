@@ -1,10 +1,6 @@
 package tsdb
 
 import (
-	"io/ioutil"
-	"os"
-	"path/filepath"
-
 	"github.com/gogo/protobuf/proto"
 	internal "github.com/influxdata/influxdb/tsdb/internal"
 )
@@ -55,6 +51,21 @@ func (s *MeasurementMappingStore) CreateMeasurementMapping(userName string) (str
 	return name, s.Save()
 }
 
+// CreateMeasurementMappingDeferred creates the in-memory mapping but does not
+// save to disk. Call SaveIfDirty after the batch completes to flush changes.
+func (s *MeasurementMappingStore) CreateMeasurementMappingDeferred(userName string) (string, error) {
+	return s.CreateMappingDeferred("", userName)
+}
+
+// SaveIfDirty writes to disk only if in-memory state has changed since last save.
+func (s *MeasurementMappingStore) SaveIfDirty() error {
+	if !s.IsDirty() {
+		return nil
+	}
+	s.ClearDirty()
+	return s.Save()
+}
+
 func (s *MeasurementMappingStore) GetUserMeasurementNames(internalNames []string) []string {
 	return s.GetUserNames("", internalNames)
 }
@@ -72,59 +83,43 @@ func (s *MeasurementMappingStore) GetAllMappings() []*MeasurementMappingInfo {
 }
 
 func (s *MeasurementMappingStore) Save() error {
-	return s.MarshalAndSave(false, func() ([]byte, error) {
-		mappings := s.GenericMappingStore.GetAllMappings("")
-		pb := internal.MeasurementMappingSet{
-			Mappings: make([]*internal.MeasurementMapping, 0, len(mappings)),
-		}
+	return s.MarshalAndSave(
+		func() ([]byte, error) {
+			mappings := s.GenericMappingStore.getAllMappingsLocked("")
+			pb := internal.MeasurementMappingSet{
+				Mappings: make([]*internal.MeasurementMapping, 0, len(mappings)),
+			}
 
-		for _, mapping := range mappings {
-			pb.Mappings = append(pb.Mappings, &internal.MeasurementMapping{
-				UserName:     mapping.UserName,
-				InternalName: mapping.InternalName,
-			})
-		}
+			for _, mapping := range mappings {
+				pb.Mappings = append(pb.Mappings, &internal.MeasurementMapping{
+					UserName:     mapping.UserName,
+					InternalName: mapping.InternalName,
+				})
+			}
 
-		return proto.Marshal(&pb)
-	})
+			return proto.Marshal(&pb)
+		},
+		func(b []byte) error {
+			var pb internal.MeasurementMappingSet
+			return proto.Unmarshal(b, &pb)
+		},
+	)
 }
 
 func (s *MeasurementMappingStore) load() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0777); err != nil {
-		return err
-	}
-
-	f, err := os.Open(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	return s.loadFromDisk(func(b []byte) error {
+		var pb internal.MeasurementMappingSet
+		if err := proto.Unmarshal(b, &pb); err != nil {
+			return err
 		}
-		return err
-	}
-	defer f.Close()
-
-	b, err := ioutil.ReadAll(f)
-	if err != nil {
-		return err
-	}
-
-	if len(b) == 0 {
+		var mappings []*MappingEntry
+		for _, m := range pb.Mappings {
+			mappings = append(mappings, &MappingEntry{
+				UserName:     m.UserName,
+				InternalName: m.InternalName,
+			})
+		}
+		s.SetMappings("", mappings)
 		return nil
-	}
-
-	var pb internal.MeasurementMappingSet
-	if err := proto.Unmarshal(b, &pb); err != nil {
-		return err
-	}
-
-	var mappings []*MappingEntry
-	for _, mapping := range pb.Mappings {
-		mappings = append(mappings, &MappingEntry{
-			UserName:     mapping.UserName,
-			InternalName: mapping.InternalName,
-		})
-	}
-	s.SetMappings("", mappings)
-
-	return nil
+	})
 }

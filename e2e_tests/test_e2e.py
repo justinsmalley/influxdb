@@ -907,9 +907,6 @@ class TestInfluxDBE2E(unittest.TestCase):
         self.assertEqual(series[0]["columns"][1], "f_new")
         self.assertEqual(series[0]["values"][0][1], 10.0)
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
     def test_15_measurement_swap_preserves_fields(self):
         """
         Verify that swapping measurement names (m1->tmp, m2->m1, tmp->m2)
@@ -1034,6 +1031,237 @@ if __name__ == "__main__":
         self.assertEqual(len(series), 1)
         self.assertEqual(series[0]["columns"][1], "f_new")
         self.assertEqual(series[0]["values"][0][1], 10.0)
+
+    def test_18_moving_functions_with_renamed_fields(self):
+        """
+        Verify that moving_average and moving_median work correctly on
+        fields that have been renamed.
+        """
+        DB = "e2e_db_moving_rename"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # 1. Write data with original field name
+        write_points(
+            [f"sensor,loc=a temp={float(i)} {i}000000000" for i in range(1, 6)],
+            db=DB,
+        )
+        time.sleep(0.5)
+
+        # 2. Rename field
+        query(
+            "ALTER MEASUREMENT sensor RENAME FIELD temp TO temperature",
+            db=DB,
+            method="POST",
+        )
+
+        # 3. Test moving_average on the renamed field
+        res_avg = query(
+            "SELECT moving_average(mean(temperature), 3) FROM sensor "
+            "WHERE time >= 0 AND time <= 6s GROUP BY time(1s)",
+            db=DB,
+        )
+        avg_values = res_avg["results"][0]["series"][0]["values"]
+        # moving_average(3) over [1, 2, 3, 4, 5]:
+        # At t=3: avg(1,2,3)=2.0, At t=4: avg(2,3,4)=3.0, At t=5: avg(3,4,5)=4.0
+        self.assertEqual(len(avg_values), 3, "Expected 3 moving_average results")
+        self.assertEqual(avg_values[0][1], 2.0)
+        self.assertEqual(avg_values[1][1], 3.0)
+        self.assertEqual(avg_values[2][1], 4.0)
+
+        # 4. Test moving_median on the renamed field
+        res_med = query(
+            "SELECT moving_median(median(temperature), 3) FROM sensor "
+            "WHERE time >= 0 AND time <= 6s GROUP BY time(1s)",
+            db=DB,
+        )
+        med_values = res_med["results"][0]["series"][0]["values"]
+        # moving_median(3) over [1, 2, 3, 4, 5]:
+        # At t=3: median(1,2,3)=2.0, At t=4: median(2,3,4)=3.0, At t=5: median(3,4,5)=4.0
+        self.assertEqual(len(med_values), 3, "Expected 3 moving_median results")
+        self.assertEqual(med_values[0][1], 2.0)
+        self.assertEqual(med_values[1][1], 3.0)
+        self.assertEqual(med_values[2][1], 4.0)
+
+        # 5. Write additional data using the new name and verify combined results
+        write_points(
+            ["sensor,loc=a temperature=6.0 6000000000"],
+            db=DB,
+        )
+        time.sleep(0.5)
+
+        res_combined = query(
+            "SELECT moving_average(mean(temperature), 3) FROM sensor "
+            "WHERE time >= 0 AND time <= 7s GROUP BY time(1s)",
+            db=DB,
+        )
+        combined_values = res_combined["results"][0]["series"][0]["values"]
+        # Now over [1, 2, 3, 4, 5, 6]:
+        # At t=3: 2.0, t=4: 3.0, t=5: 4.0, t=6: 5.0
+        self.assertEqual(len(combined_values), 4, "Expected 4 results with new data")
+        self.assertEqual(combined_values[3][1], 5.0)
+
+        # 6. Verify old field name does NOT work with moving functions
+        res_old = query(
+            "SELECT moving_average(mean(temp), 3) FROM sensor "
+            "WHERE time >= 0 AND time <= 6s GROUP BY time(1s)",
+            db=DB,
+        )
+        # Should return no series or empty results since temp is renamed
+        series_old = res_old.get("results", [{}])[0].get("series", [])
+        self.assertEqual(
+            len(series_old), 0,
+            "Old field name 'temp' should not return results"
+        )
+
+    def test_19_reconciliation_after_external_data(self):
+        """
+        Verify that externally-added data (simulating a backup restore or
+        offline import) gets identity mappings created through reconciliation
+        on container restart.
+
+        This test:
+        1. Writes data and renames a field (creates mappings)
+        2. Writes new data to a NEW measurement via line protocol (simulates
+           new data appearing that has no mapping yet)
+        3. Verifies the new measurement gets an identity mapping
+        4. Verifies the existing rename is unaffected
+        """
+        DB = "e2e_db_reconcile"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # 1. Write data and create a rename mapping
+        write_points(["existing_meas,tag=1 f1=10.0 1000000000"], db=DB)
+        time.sleep(0.5)
+        query(
+            "ALTER MEASUREMENT existing_meas RENAME FIELD f1 TO f1_renamed",
+            db=DB,
+            method="POST",
+        )
+
+        # 2. Write data to a brand new measurement (dense mapping creates identity)
+        write_points(["new_meas,tag=1 new_field=42.0 2000000000"], db=DB)
+        time.sleep(0.5)
+
+        # 3. Verify the new measurement has an identity mapping
+        mappings_res = query("SHOW MEASUREMENT MAPPINGS", db=DB)
+        series = mappings_res.get("results", [{}])[0].get("series", [])
+        self.assertTrue(len(series) > 0, "Expected measurement mappings")
+
+        found_new = False
+        found_existing = False
+        for row in series[0]["values"]:
+            if row[0] == "new_meas":
+                found_new = True
+                # Identity mapping: user_name == internal_name
+                self.assertEqual(
+                    row[0], row[1],
+                    "New measurement should have identity mapping"
+                )
+            if row[0] == "existing_meas":
+                found_existing = True
+        self.assertTrue(found_new, "new_meas should appear in mappings")
+        self.assertTrue(found_existing, "existing_meas should still be in mappings")
+
+        # 4. Verify the existing rename is unaffected
+        res = query("SELECT f1_renamed FROM existing_meas", db=DB)
+        series_data = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series_data), 1, "Renamed field should still work")
+        self.assertEqual(series_data[0]["values"][0][1], 10.0)
+
+        # 5. Verify field mappings show the new field with identity mapping
+        field_mappings = query("SHOW FIELD MAPPINGS", db=DB)
+        field_series = field_mappings.get("results", [{}])[0].get("series", [])
+        self.assertTrue(len(field_series) > 0, "Expected field mappings")
+
+        found_new_field = False
+        found_renamed = False
+        for row in field_series[0]["values"]:
+            # Columns: measurement, user_name, internal_name
+            if row[0] == "new_meas" and row[1] == "new_field":
+                found_new_field = True
+                self.assertEqual(
+                    row[1], row[2],
+                    "new_field should have identity mapping"
+                )
+            if row[0] == "existing_meas" and row[1] == "f1_renamed":
+                found_renamed = True
+                # Internal name should be f1 (the original)
+                self.assertEqual(row[2], "f1", "Internal name should be f1")
+        self.assertTrue(found_new_field, "new_field should appear in field mappings")
+        self.assertTrue(found_renamed, "f1_renamed should appear in field mappings")
+
+    def test_20_reconciliation_after_restart(self):
+        """
+        Verify that after a container restart, measurements and fields that
+        exist in shard data but are missing from mapping stores get identity
+        mappings created via reconciliation.
+
+        This requires Docker access to restart the container.
+        """
+        import subprocess
+        import os
+
+        # Skip if not running in Docker E2E environment
+        container_name = os.environ.get("INFLUXDB_CONTAINER", "")
+        if not container_name:
+            self.skipTest(
+                "INFLUXDB_CONTAINER env var not set; "
+                "skipping container restart test"
+            )
+
+        DB = "e2e_db_restart_reconcile"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # 1. Write data and rename a field
+        write_points(["meas_before,tag=1 f_before=10.0 1000000000"], db=DB)
+        time.sleep(0.5)
+        query(
+            "ALTER MEASUREMENT meas_before RENAME FIELD f_before TO f_renamed",
+            db=DB,
+            method="POST",
+        )
+        time.sleep(0.5)
+
+        # 2. Restart the container to trigger reconciliation
+        subprocess.run(
+            ["docker", "restart", container_name],
+            check=True, timeout=30,
+        )
+
+        # Wait for the container to be ready
+        for attempt in range(30):
+            try:
+                query("SHOW DATABASES", db="")
+                break
+            except Exception:
+                time.sleep(1)
+        else:
+            self.fail("Container did not restart within 30 seconds")
+
+        # 3. Verify existing rename is preserved (reconciliation must not
+        #    overwrite existing mappings)
+        res = query("SELECT f_renamed FROM meas_before", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, "Renamed field should survive restart")
+        self.assertEqual(series[0]["values"][0][1], 10.0)
+
+        # 4. Verify that querying by old name returns nothing
+        res_old = query("SELECT f_before FROM meas_before", db=DB)
+        self.assertNotIn(
+            "series", res_old.get("results", [{}])[0],
+            "Old field name should not return data after restart"
+        )
+
+        # 5. Write to a new measurement (creates mapping via normal write path)
+        write_points(["meas_after,tag=1 f_after=20.0 3000000000"], db=DB)
+        time.sleep(0.5)
+
+        res_after = query("SELECT f_after FROM meas_after", db=DB)
+        series_after = res_after.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series_after), 1, "New measurement after restart should work")
 
 
 if __name__ == "__main__":
