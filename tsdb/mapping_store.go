@@ -32,8 +32,9 @@ func newGroupMappings() *GroupMappings {
 }
 
 type GenericMappingStore struct {
-	mu       sync.RWMutex
-	path     string
+	mu     sync.RWMutex
+	fileMu sync.Mutex   // serializes concurrent saves; held only during disk I/O
+	path   string
 	mappings map[string]*GroupMappings
 	dirty    bool // true when in-memory state is ahead of disk (deferred saves)
 }
@@ -67,8 +68,12 @@ func (s *GenericMappingStore) createMappingLocked(group, userName string) (strin
 	}
 
 	// Find next free internal name: userName, userName.v2, ... (rare path; iterating map is fine)
+	const maxVersionSuffix = 10000
 	var internalName string
 	for next := 1; ; next++ {
+		if next > maxVersionSuffix {
+			return "", fmt.Errorf("mapping: too many versions of name %q (max %d); drop old versions before creating new ones", userName, maxVersionSuffix)
+		}
 		if next == 1 {
 			internalName = userName
 		} else {
@@ -145,10 +150,11 @@ func (s *GenericMappingStore) RenameMapping(group, oldName, newName string) erro
 		return fmt.Errorf("field %s already exists", newName)
 	}
 
-	// 2. Find oldName
+	// 2. Find oldName — must already exist; silently creating an identity mapping
+	// for a non-existent name would produce dangling entries.
 	oldMapping, exists := groupMappings.ByUser[oldName]
 	if !exists {
-		oldMapping = &MappingEntry{UserName: oldName, InternalName: oldName}
+		return fmt.Errorf("mapping: %q not found", oldName)
 	}
 
 	internalName := oldMapping.InternalName
@@ -233,6 +239,14 @@ func (s *GenericMappingStore) GetAllMappings(group string) []*MappingEntry {
 	return s.getAllMappingsLocked(group)
 }
 
+// JSONMappingEntry is the on-disk JSON representation of a single name mapping.
+// UserName == "" indicates a deleted entry: the internal slot is reserved and
+// will return "" from GetUserNames (hiding the field/measurement from queries).
+type JSONMappingEntry struct {
+	UserName     string `json:"userName"`
+	InternalName string `json:"internalName"`
+}
+
 // getAllMappingsLocked returns all active mappings. Caller must hold at least s.mu.RLock().
 func (s *GenericMappingStore) getAllMappingsLocked(group string) []*MappingEntry {
 	groupMappings, exists := s.mappings[group]
@@ -249,17 +263,41 @@ func (s *GenericMappingStore) getAllMappingsLocked(group string) []*MappingEntry
 	return result
 }
 
-func (s *GenericMappingStore) MarshalAndSave(marshalFunc func() ([]byte, error), verifyFunc func([]byte) error) error {
-	// Hold the full lock for marshaling and file operations to prevent concurrent
-	// saves from racing on file renames. This is acceptable because saves are
-	// infrequent (once per batch for deferred writes, or on rare DDL operations).
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// getAllEntriesLocked returns ALL entries including deleted ones (UserName == "").
+// This is used by Save() to persist the full state, ensuring that deleted
+// slots are preserved across restarts. Caller must hold at least s.mu.RLock().
+func (s *GenericMappingStore) getAllEntriesLocked(group string) []JSONMappingEntry {
+	groupMappings, exists := s.mappings[group]
+	if !exists {
+		return nil
+	}
 
+	result := make([]JSONMappingEntry, 0, len(groupMappings.ByInternal))
+	for internalName, userName := range groupMappings.ByInternal {
+		result = append(result, JSONMappingEntry{
+			UserName:     userName,
+			InternalName: internalName,
+		})
+	}
+	return result
+}
+
+func (s *GenericMappingStore) MarshalAndSave(marshalFunc func() ([]byte, error), verifyFunc func([]byte) error) error {
+	// Step 1: snapshot in-memory state under a read lock.
+	// This is brief — just enough to serialize the marshal against concurrent mutations.
+	// Readers and writers are not blocked during the subsequent disk I/O.
+	s.mu.RLock()
 	b, err := marshalFunc()
+	s.mu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("marshal mapping data: %w", err)
 	}
+
+	// Step 2: all disk I/O under a separate mutex.
+	// This serializes concurrent saves (e.g. two goroutines flushing the same
+	// store) without blocking in-memory reads or writes.
+	s.fileMu.Lock()
+	defer s.fileMu.Unlock()
 
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0777); err != nil {
@@ -371,23 +409,47 @@ func (s *GenericMappingStore) ClearDirty() {
 }
 
 // loadFromDisk handles the shared load-with-backup-fallback pattern.
-// unmarshalAndPopulate receives the raw bytes and must unmarshal the protobuf
+// unmarshalAndPopulate receives the raw bytes and must unmarshal the JSON
 // and call SetMappings to populate the in-memory state.
+//
+// Recovery order:
+//  1. Primary file present and valid — use it.
+//  2. Primary file present but corrupt — fall back to .bak.
+//  3. Primary file missing — check .bak and recover from it if present;
+//     treat as empty store only if .bak also does not exist.
 func (s *GenericMappingStore) loadFromDisk(unmarshalAndPopulate func([]byte) error) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0777); err != nil {
 		return err
 	}
 
-	b, err := s.loadWithBackup()
-	if err != nil {
-		return err
+	b, primaryErr := s.loadWithBackup()
+	if primaryErr != nil {
+		// IO error reading primary — hard failure, don't silently continue.
+		return primaryErr
 	}
+
 	if b == nil {
+		// Primary is missing or empty — check for a backup to recover from.
+		backupBytes, backupErr := s.loadBackupFile()
+		if backupErr != nil {
+			if os.IsNotExist(backupErr) {
+				return nil // Neither primary nor backup: genuinely new store.
+			}
+			// Backup exists but can't be read — hard failure.
+			return fmt.Errorf("primary mapping file %s is missing and backup is unreadable: %v", s.path, backupErr)
+		}
+		// Backup is readable; recover from it.
+		if unmarshalErr := unmarshalAndPopulate(backupBytes); unmarshalErr != nil {
+			return fmt.Errorf("primary mapping file %s is missing and backup is corrupt: %v", s.path, unmarshalErr)
+		}
+		if err := ioutil.WriteFile(s.path, backupBytes, 0666); err != nil {
+			return fmt.Errorf("failed to restore primary mapping file from backup: %w", err)
+		}
 		return nil
 	}
 
 	if err := unmarshalAndPopulate(b); err != nil {
-		// Primary file corrupt — try backup
+		// Primary file corrupt — try backup.
 		backupBytes, backupErr := s.loadBackupFile()
 		if backupErr != nil {
 			return fmt.Errorf("mapping file %s corrupt (%v) and no valid backup: %v", s.path, err, backupErr)
@@ -395,8 +457,10 @@ func (s *GenericMappingStore) loadFromDisk(unmarshalAndPopulate func([]byte) err
 		if unmarshalErr := unmarshalAndPopulate(backupBytes); unmarshalErr != nil {
 			return fmt.Errorf("mapping file %s corrupt (%v) and backup also corrupt: %v", s.path, err, unmarshalErr)
 		}
-		// Recovered from backup — restore it as the primary
-		ioutil.WriteFile(s.path, backupBytes, 0666)
+		// Recovered from backup — restore it as the primary.
+		if err := ioutil.WriteFile(s.path, backupBytes, 0666); err != nil {
+			return fmt.Errorf("failed to restore primary mapping file from backup: %w", err)
+		}
 	}
 
 	return nil
@@ -426,8 +490,13 @@ func (s *GenericMappingStore) SetMappings(group string, mappings []*MappingEntry
 	groupMappings := newGroupMappings()
 	for _, m := range mappings {
 		mCopy := *m
-		groupMappings.ByUser[m.UserName] = &mCopy
+		// UserName == "" means this internal slot is deleted; record it in
+		// ByInternal so GetUserNames returns "" (hidden) rather than falling
+		// back to the internal name. Do NOT add to ByUser.
 		groupMappings.ByInternal[m.InternalName] = m.UserName
+		if m.UserName != "" {
+			groupMappings.ByUser[m.UserName] = &mCopy
+		}
 	}
 	s.mappings[group] = groupMappings
 }

@@ -26,7 +26,7 @@ func TestDDL_RenameDatabase_CorruptMappingStore(t *testing.T) {
 	// the DatabaseMappingStore. By corrupting the file first, the load will fail
 	// and Open() will log a warning (non-fatal for reconcile), but the store won't
 	// be cached. The next access from DDL will attempt to load again and fail.
-	mappingPath := filepath.Join(dir, "database_mappings.idx")
+	mappingPath := filepath.Join(dir, "database_mappings.json")
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestDDL_DropField_CorruptMeasurementMapping(t *testing.T) {
 	if err := os.MkdirAll(dbDir, 0777); err != nil {
 		t.Fatal(err)
 	}
-	measMappingPath := filepath.Join(dbDir, "measurement_mappings.idx")
+	measMappingPath := filepath.Join(dbDir, "measurement_mappings.json")
 	if err := ioutil.WriteFile(measMappingPath, []byte("corrupt measurement data"), 0666); err != nil {
 		t.Fatal(err)
 	}
@@ -157,9 +157,9 @@ func TestDDL_RenameField_CorruptFieldMapping(t *testing.T) {
 	}
 
 	// Corrupt the field mapping file BEFORE FieldMappingStore("testdb") is first accessed.
-	// Note: field mapping files don't use .idx extension — the path is just "field_mappings".
+	// Note: field mapping files don't use .idx extension — the path is just "field_mappings.json".
 	dbDir := filepath.Join(dir, "testdb")
-	fieldMappingPath := filepath.Join(dbDir, "field_mappings")
+	fieldMappingPath := filepath.Join(dbDir, "field_mappings.json")
 	if err := ioutil.WriteFile(fieldMappingPath, []byte("corrupt field data"), 0666); err != nil {
 		t.Fatal(err)
 	}

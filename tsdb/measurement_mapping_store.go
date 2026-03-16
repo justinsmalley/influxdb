@@ -1,8 +1,8 @@
 package tsdb
 
 import (
-	"github.com/gogo/protobuf/proto"
-	internal "github.com/influxdata/influxdb/tsdb/internal"
+	"encoding/json"
+	"sort"
 )
 
 type MeasurementMapping = MappingEntry
@@ -14,6 +14,11 @@ type MeasurementMappingInfo struct {
 
 type MeasurementMappingStore struct {
 	*GenericMappingStore
+}
+
+// jsonMeasurementMappingFile is the on-disk JSON format for measurement_mappings.json.
+type jsonMeasurementMappingFile struct {
+	Mappings []JSONMappingEntry `json:"mappings"`
 }
 
 func NewMeasurementMappingStore(path string) (*MeasurementMappingStore, error) {
@@ -28,22 +33,32 @@ func (s *MeasurementMappingStore) GetInternalMeasurementName(userName string) (s
 }
 
 func (s *MeasurementMappingStore) RenameMeasurement(oldName, newName string) error {
-	err := s.RenameMapping("", oldName, newName)
-	if err != nil {
+	if err := ValidateMeasurementName(oldName); err != nil {
+		return err
+	}
+	if err := ValidateMeasurementName(newName); err != nil {
+		return err
+	}
+	if err := s.RenameMapping("", oldName, newName); err != nil {
 		return err
 	}
 	return s.Save()
 }
 
 func (s *MeasurementMappingStore) SoftDeleteMeasurement(userName string) error {
-	err := s.SoftDeleteMapping("", userName)
-	if err != nil {
+	if err := ValidateMeasurementName(userName); err != nil {
+		return err
+	}
+	if err := s.SoftDeleteMapping("", userName); err != nil {
 		return err
 	}
 	return s.Save()
 }
 
 func (s *MeasurementMappingStore) CreateMeasurementMapping(userName string) (string, error) {
+	if err := ValidateMeasurementName(userName); err != nil {
+		return "", err
+	}
 	name, err := s.CreateMapping("", userName)
 	if err != nil {
 		return "", err
@@ -54,6 +69,9 @@ func (s *MeasurementMappingStore) CreateMeasurementMapping(userName string) (str
 // CreateMeasurementMappingDeferred creates the in-memory mapping but does not
 // save to disk. Call SaveIfDirty after the batch completes to flush changes.
 func (s *MeasurementMappingStore) CreateMeasurementMappingDeferred(userName string) (string, error) {
+	if err := ValidateMeasurementName(userName); err != nil {
+		return "", err
+	}
 	return s.CreateMappingDeferred("", userName)
 }
 
@@ -62,8 +80,12 @@ func (s *MeasurementMappingStore) SaveIfDirty() error {
 	if !s.IsDirty() {
 		return nil
 	}
+	if err := s.Save(); err != nil {
+		// Leave dirty=true so the next batch retries the flush.
+		return err
+	}
 	s.ClearDirty()
-	return s.Save()
+	return nil
 }
 
 func (s *MeasurementMappingStore) GetUserMeasurementNames(internalNames []string) []string {
@@ -85,38 +107,31 @@ func (s *MeasurementMappingStore) GetAllMappings() []*MeasurementMappingInfo {
 func (s *MeasurementMappingStore) Save() error {
 	return s.MarshalAndSave(
 		func() ([]byte, error) {
-			mappings := s.GenericMappingStore.getAllMappingsLocked("")
-			pb := internal.MeasurementMappingSet{
-				Mappings: make([]*internal.MeasurementMapping, 0, len(mappings)),
-			}
-
-			for _, mapping := range mappings {
-				pb.Mappings = append(pb.Mappings, &internal.MeasurementMapping{
-					UserName:     mapping.UserName,
-					InternalName: mapping.InternalName,
-				})
-			}
-
-			return proto.Marshal(&pb)
+			entries := s.GenericMappingStore.getAllEntriesLocked("")
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].InternalName < entries[j].InternalName
+			})
+			jf := jsonMeasurementMappingFile{Mappings: entries}
+			return json.Marshal(jf)
 		},
 		func(b []byte) error {
-			var pb internal.MeasurementMappingSet
-			return proto.Unmarshal(b, &pb)
+			var jf jsonMeasurementMappingFile
+			return json.Unmarshal(b, &jf)
 		},
 	)
 }
 
 func (s *MeasurementMappingStore) load() error {
 	return s.loadFromDisk(func(b []byte) error {
-		var pb internal.MeasurementMappingSet
-		if err := proto.Unmarshal(b, &pb); err != nil {
+		var jf jsonMeasurementMappingFile
+		if err := json.Unmarshal(b, &jf); err != nil {
 			return err
 		}
-		var mappings []*MappingEntry
-		for _, m := range pb.Mappings {
+		mappings := make([]*MappingEntry, 0, len(jf.Mappings))
+		for _, e := range jf.Mappings {
 			mappings = append(mappings, &MappingEntry{
-				UserName:     m.UserName,
-				InternalName: m.InternalName,
+				UserName:     e.UserName,
+				InternalName: e.InternalName,
 			})
 		}
 		s.SetMappings("", mappings)

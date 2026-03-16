@@ -18,7 +18,7 @@ func TestMarshalAndSave_PersistsAndReloads(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// Field mapping store
-	path := filepath.Join(dir, "field_mappings")
+	path := filepath.Join(dir, "field_mappings.json")
 	store, err := tsdb.NewFieldMappingStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestMarshalAndSave_DatabaseStore(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "database_mappings.idx")
+	path := filepath.Join(dir, "database_mappings.json")
 	store, err := tsdb.NewDatabaseMappingStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestMarshalAndSave_MeasurementStore(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "measurement_mappings.idx")
+	path := filepath.Join(dir, "measurement_mappings.json")
 	store, err := tsdb.NewMeasurementMappingStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestMarshalAndSave_DropRecreateReusesSlot(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "field_mappings")
+	path := filepath.Join(dir, "field_mappings.json")
 	store, err := tsdb.NewFieldMappingStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +170,7 @@ func TestMarshalAndSave_RenameCreatesVersionSuffix(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "field_mappings")
+	path := filepath.Join(dir, "field_mappings.json")
 	store, err := tsdb.NewFieldMappingStore(path)
 	if err != nil {
 		t.Fatal(err)

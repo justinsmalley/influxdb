@@ -1,8 +1,8 @@
 package tsdb
 
 import (
-	"github.com/gogo/protobuf/proto"
-	internal "github.com/influxdata/influxdb/tsdb/internal"
+	"encoding/json"
+	"sort"
 )
 
 type FieldMapping = MappingEntry
@@ -15,6 +15,17 @@ type FieldMappingInfo struct {
 
 type FieldMappingStore struct {
 	*GenericMappingStore
+}
+
+// jsonFieldMappingMeasurement is one measurement's entries in field_mappings.json.
+type jsonFieldMappingMeasurement struct {
+	Name     string             `json:"name"`
+	Mappings []JSONMappingEntry `json:"mappings"`
+}
+
+// jsonFieldMappingFile is the on-disk JSON format for field_mappings.json.
+type jsonFieldMappingFile struct {
+	Measurements []jsonFieldMappingMeasurement `json:"measurements"`
 }
 
 func NewFieldMappingStore(path string) (*FieldMappingStore, error) {
@@ -78,8 +89,12 @@ func (s *FieldMappingStore) SaveIfDirty() error {
 	if !s.IsDirty() {
 		return nil
 	}
+	if err := s.Save(); err != nil {
+		// Leave dirty=true so the next batch retries the flush.
+		return err
+	}
 	s.ClearDirty()
-	return s.Save()
+	return nil
 }
 
 func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldNames []string) []string {
@@ -111,56 +126,52 @@ func (s *FieldMappingStore) GetAllMappings(measurement string) []*FieldMappingIn
 	return result
 }
 
-// Save writes the mapping store to disk
+// Save writes the mapping store to disk.
 func (s *FieldMappingStore) Save() error {
 	return s.MarshalAndSave(
 		func() ([]byte, error) {
 			groups := s.GenericMappingStore.getAllGroupsLocked()
-			pb := internal.FieldMappingSet{
-				Measurements: make([]*internal.FieldMappingMeasurement, 0, len(groups)),
+			sort.Strings(groups)
+
+			jf := jsonFieldMappingFile{
+				Measurements: make([]jsonFieldMappingMeasurement, 0, len(groups)),
 			}
 
-			for _, measurement := range groups {
-				measMappings := s.GenericMappingStore.getAllMappingsLocked(measurement)
-				meas := &internal.FieldMappingMeasurement{
-					Name:     []byte(measurement),
-					Mappings: make([]*internal.FieldMapping, 0, len(measMappings)),
-				}
-
-				for _, mapping := range measMappings {
-					meas.Mappings = append(meas.Mappings, &internal.FieldMapping{
-						UserName:     mapping.UserName,
-						InternalName: mapping.InternalName,
-					})
-				}
-				pb.Measurements = append(pb.Measurements, meas)
+			for _, meas := range groups {
+				entries := s.GenericMappingStore.getAllEntriesLocked(meas)
+				sort.Slice(entries, func(i, j int) bool {
+					return entries[i].InternalName < entries[j].InternalName
+				})
+				jf.Measurements = append(jf.Measurements, jsonFieldMappingMeasurement{
+					Name:     meas,
+					Mappings: entries,
+				})
 			}
 
-			return proto.Marshal(&pb)
+			return json.Marshal(jf)
 		},
 		func(b []byte) error {
-			var pb internal.FieldMappingSet
-			return proto.Unmarshal(b, &pb)
+			var jf jsonFieldMappingFile
+			return json.Unmarshal(b, &jf)
 		},
 	)
 }
 
 func (s *FieldMappingStore) load() error {
 	return s.loadFromDisk(func(b []byte) error {
-		var pb internal.FieldMappingSet
-		if err := proto.Unmarshal(b, &pb); err != nil {
+		var jf jsonFieldMappingFile
+		if err := json.Unmarshal(b, &jf); err != nil {
 			return err
 		}
-		for _, meas := range pb.Measurements {
-			measurement := string(meas.Name)
-			var measMappings []*MappingEntry
-			for _, mapping := range meas.Mappings {
-				measMappings = append(measMappings, &MappingEntry{
-					UserName:     mapping.UserName,
-					InternalName: mapping.InternalName,
+		for _, meas := range jf.Measurements {
+			mappings := make([]*MappingEntry, 0, len(meas.Mappings))
+			for _, e := range meas.Mappings {
+				mappings = append(mappings, &MappingEntry{
+					UserName:     e.UserName,
+					InternalName: e.InternalName,
 				})
 			}
-			s.SetMappings(measurement, measMappings)
+			s.SetMappings(meas.Name, mappings)
 		}
 		return nil
 	})

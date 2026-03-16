@@ -1,8 +1,8 @@
 package tsdb
 
 import (
-	"github.com/gogo/protobuf/proto"
-	internal "github.com/influxdata/influxdb/tsdb/internal"
+	"encoding/json"
+	"sort"
 )
 
 type DatabaseMapping = MappingEntry
@@ -14,6 +14,11 @@ type DatabaseMappingInfo struct {
 
 type DatabaseMappingStore struct {
 	*GenericMappingStore
+}
+
+// jsonDatabaseMappingFile is the on-disk JSON format for database_mappings.json.
+type jsonDatabaseMappingFile struct {
+	Mappings []JSONMappingEntry `json:"mappings"`
 }
 
 func NewDatabaseMappingStore(path string) (*DatabaseMappingStore, error) {
@@ -86,38 +91,31 @@ func (s *DatabaseMappingStore) GetAllMappings() []*DatabaseMappingInfo {
 func (s *DatabaseMappingStore) Save() error {
 	return s.MarshalAndSave(
 		func() ([]byte, error) {
-			mappings := s.GenericMappingStore.getAllMappingsLocked("")
-			pb := internal.DatabaseMappingSet{
-				Mappings: make([]*internal.DatabaseMapping, 0, len(mappings)),
-			}
-
-			for _, mapping := range mappings {
-				pb.Mappings = append(pb.Mappings, &internal.DatabaseMapping{
-					UserName:     mapping.UserName,
-					InternalName: mapping.InternalName,
-				})
-			}
-
-			return proto.Marshal(&pb)
+			entries := s.GenericMappingStore.getAllEntriesLocked("")
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].InternalName < entries[j].InternalName
+			})
+			jf := jsonDatabaseMappingFile{Mappings: entries}
+			return json.Marshal(jf)
 		},
 		func(b []byte) error {
-			var pb internal.DatabaseMappingSet
-			return proto.Unmarshal(b, &pb)
+			var jf jsonDatabaseMappingFile
+			return json.Unmarshal(b, &jf)
 		},
 	)
 }
 
 func (s *DatabaseMappingStore) load() error {
 	return s.loadFromDisk(func(b []byte) error {
-		var pb internal.DatabaseMappingSet
-		if err := proto.Unmarshal(b, &pb); err != nil {
+		var jf jsonDatabaseMappingFile
+		if err := json.Unmarshal(b, &jf); err != nil {
 			return err
 		}
-		var mappings []*MappingEntry
-		for _, m := range pb.Mappings {
+		mappings := make([]*MappingEntry, 0, len(jf.Mappings))
+		for _, e := range jf.Mappings {
 			mappings = append(mappings, &MappingEntry{
-				UserName:     m.UserName,
-				InternalName: m.InternalName,
+				UserName:     e.UserName,
+				InternalName: e.InternalName,
 			})
 		}
 		s.SetMappings("", mappings)

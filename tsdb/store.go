@@ -587,7 +587,7 @@ func (s *Store) FieldMappingStore(database string) (*FieldMappingStore, error) {
 		return store, nil
 	}
 
-	path := filepath.Join(s.path, database, "field_mappings")
+	path := filepath.Join(s.path, database, "field_mappings.json")
 	store, err := NewFieldMappingStore(path)
 	if err != nil {
 		return nil, err
@@ -1014,24 +1014,30 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 	epochs := s.epochsForShards(shards)
 	s.mu.RUnlock()
 
-	// Handle measurement mappings: resolve internal name and completely remove mapping
+	// Handle measurement mappings: resolve internal name and completely remove mapping.
 	internalName := name
-	if store, err := s.MeasurementMappingStore(database); err == nil {
-		if internal, isActive := store.GetInternalMeasurementName(name); isActive {
-			internalName = internal
-		}
-
-		// Completely remove it from the mapping store instead of soft deleting
-		// This guarantees the name is fully released for recreation
-		store.DropMappingsByInternalName("", internalName)
-		store.Save() // Save to disk
+	measMappingStore, err := s.MeasurementMappingStore(database)
+	if err != nil {
+		return err
+	}
+	if internal, isActive := measMappingStore.GetInternalMeasurementName(name); isActive {
+		internalName = internal
+	}
+	// Completely remove it from the mapping store instead of soft deleting.
+	// This guarantees the name is fully released for recreation.
+	measMappingStore.DropMappingsByInternalName("", internalName)
+	if err := measMappingStore.Save(); err != nil {
+		return fmt.Errorf("save measurement mapping after drop: %w", err)
 	}
 
-	// Also completely remove field mappings for this measurement
-	if fieldStore, err := s.FieldMappingStore(database); err == nil {
-		// Field mappings are keyed by internal MeasurementName
-		fieldStore.DropGroup(internalName)
-		fieldStore.Save()
+	// Also completely remove field mappings for this measurement.
+	fieldMappingStore, err := s.FieldMappingStore(database)
+	if err != nil {
+		return err
+	}
+	fieldMappingStore.DropGroup(internalName)
+	if err := fieldMappingStore.Save(); err != nil {
+		return fmt.Errorf("save field mapping after drop: %w", err)
 	}
 
 	// Limit to 1 delete for each shard since expanding the measurement into the list
@@ -2210,7 +2216,7 @@ func (s *Store) DatabaseMappingStore() (*DatabaseMappingStore, error) {
 		return s.databaseMappingStore, nil
 	}
 
-	mappingPath := filepath.Join(s.path, "database_mappings.idx")
+	mappingPath := filepath.Join(s.path, "database_mappings.json")
 
 	store, err := NewDatabaseMappingStore(mappingPath)
 	if err != nil {
@@ -2257,10 +2263,10 @@ func (s *Store) MeasurementMappingStore(database string) (*MeasurementMappingSto
 		return store, nil
 	}
 
-	// Path: <db_path>/measurement_mappings.idx
+	// Path: <db_path>/measurement_mappings.json
 	// We'll store it alongside the retention policy directories in the database folder
 	dbPath := filepath.Join(s.path, database)
-	mappingPath := filepath.Join(dbPath, "measurement_mappings.idx")
+	mappingPath := filepath.Join(dbPath, "measurement_mappings.json")
 
 	store, err := NewMeasurementMappingStore(mappingPath)
 	if err != nil {

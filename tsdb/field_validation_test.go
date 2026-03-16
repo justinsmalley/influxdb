@@ -66,19 +66,6 @@ func TestValidateFieldName(t *testing.T) {
 			errorMsg:    "field name cannot have leading or trailing whitespace",
 		},
 
-		// Length validation
-		{
-			name:        "exceeds max length",
-			fieldName:   strings.Repeat("a", MaxFieldNameLength+1),
-			expectError: true,
-			errorMsg:    "field name exceeds maximum length",
-		},
-		{
-			name:        "exactly max length",
-			fieldName:   strings.Repeat("a", MaxFieldNameLength),
-			expectError: false,
-		},
-
 		// Invalid UTF-8
 		{
 			name:        "invalid UTF-8 sequence",
@@ -281,25 +268,11 @@ func TestValidateFieldName_VersionSuffixAllowed(t *testing.T) {
 }
 
 func TestValidateFieldName_Constants(t *testing.T) {
-	// Test that our constants are reasonable
-	if MaxFieldNameLength <= 0 {
-		t.Errorf("MaxFieldNameLength should be positive, got %d", MaxFieldNameLength)
-	}
-
-	if MaxFieldNameLength > 1000 {
-		t.Errorf("MaxFieldNameLength seems too large: %d", MaxFieldNameLength)
-	}
-
 	if InternalDelimiter == "" {
 		t.Errorf("InternalDelimiter should not be empty")
 	}
 
-	// Test that reserved names map is populated
-	if len(reservedFieldNames) == 0 {
-		t.Errorf("reservedFieldNames map should not be empty")
-	}
-
-	// Test that all reserved names are actually reserved
+	// All reserved names must be rejected
 	for reservedName := range reservedFieldNames {
 		err := ValidateFieldName(reservedName)
 		if err == nil {

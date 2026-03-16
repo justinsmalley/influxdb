@@ -1264,5 +1264,77 @@ class TestInfluxDBE2E(unittest.TestCase):
         self.assertEqual(len(series_after), 1, "New measurement after restart should work")
 
 
+class TestMovingFunctionsAfterRename(unittest.TestCase):
+    """moving_average and moving_median work correctly on renamed fields."""
+
+    DB = "e2e_db_moving_rename"
+
+    @classmethod
+    def setUpClass(cls):
+        query(f"DROP DATABASE {cls.DB}", db="", method="POST")
+        query(f"CREATE DATABASE {cls.DB}", db="", method="POST")
+
+        # Write 5 points with field "temp" at 1-second intervals.
+        # Times are in nanoseconds: 1s, 2s, 3s, 4s, 5s.
+        write_points(
+            [
+                "sensors temp=10.0 1000000000",
+                "sensors temp=20.0 2000000000",
+                "sensors temp=30.0 3000000000",
+                "sensors temp=40.0 4000000000",
+                "sensors temp=50.0 5000000000",
+            ],
+            db=cls.DB,
+        )
+
+        # Rename field "temp" -> "temperature".
+        query("RENAME FIELD temp TO temperature ON sensors", db=cls.DB, method="POST")
+
+    def _get_values(self, result):
+        """Extract [[time, value], ...] from the first series of a query result."""
+        series = result.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected 1 series, got {len(series)}: {result}")
+        return series[0]["values"]
+
+    def test_moving_average_after_rename(self):
+        # moving_average(temperature, 3) over the 5 points.
+        # Window = 3 rows (no GROUP BY interval → row-based window).
+        # Expected output rows (InfluxDB emits from row index windowSize-1 onward):
+        #   t=3s: avg(10,20,30) = 20.0
+        #   t=4s: avg(20,30,40) = 30.0
+        #   t=5s: avg(30,40,50) = 40.0
+        res = query(
+            "SELECT moving_average(temperature, 3) FROM sensors",
+            db=self.DB,
+        )
+        values = self._get_values(res)
+        self.assertEqual(len(values), 3, f"Expected 3 output rows, got {len(values)}: {values}")
+        self.assertAlmostEqual(values[0][1], 20.0, places=6)
+        self.assertAlmostEqual(values[1][1], 30.0, places=6)
+        self.assertAlmostEqual(values[2][1], 40.0, places=6)
+
+    def test_moving_median_after_rename(self):
+        # moving_median(temperature, 3) over the 5 points.
+        # Expected output rows (same window logic as moving_average):
+        #   t=3s: median(10,20,30) = 20.0
+        #   t=4s: median(20,30,40) = 30.0
+        #   t=5s: median(30,40,50) = 40.0
+        res = query(
+            "SELECT moving_median(temperature, 3) FROM sensors",
+            db=self.DB,
+        )
+        values = self._get_values(res)
+        self.assertEqual(len(values), 3, f"Expected 3 output rows, got {len(values)}: {values}")
+        self.assertAlmostEqual(values[0][1], 20.0, places=6)
+        self.assertAlmostEqual(values[1][1], 30.0, places=6)
+        self.assertAlmostEqual(values[2][1], 40.0, places=6)
+
+    def test_old_field_name_returns_no_data(self):
+        # After rename, querying by the old name "temp" should return no series.
+        res = query("SELECT temp FROM sensors", db=self.DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 0, f"Old field name should not return data: {res}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

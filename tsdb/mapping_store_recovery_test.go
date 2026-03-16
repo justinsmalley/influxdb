@@ -18,7 +18,7 @@ func TestRecovery_CorruptPrimary_FallsBackToBackup(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "field_mappings")
+	path := filepath.Join(dir, "field_mappings.json")
 
 	// Create a store and add a mapping (this creates the file)
 	store, err := tsdb.NewFieldMappingStore(path)
@@ -67,7 +67,7 @@ func TestRecovery_BothCorrupt_ReturnsError(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "field_mappings")
+	path := filepath.Join(dir, "field_mappings.json")
 
 	// Create a store with data to establish the file
 	store, err := tsdb.NewFieldMappingStore(path)
@@ -93,8 +93,9 @@ func TestRecovery_BothCorrupt_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestRecovery_PrimaryMissing_BackupExists verifies that a missing primary
-// file with an existing .bak does NOT auto-recover (we treat missing as empty).
+// TestRecovery_PrimaryMissing_BackupExists verifies that when the primary file
+// is missing but a .bak backup exists, the store recovers from the backup and
+// restores it as the primary.
 func TestRecovery_PrimaryMissing_BackupExists(t *testing.T) {
 	dir, err := os.MkdirTemp("", "recovery_missing_primary")
 	if err != nil {
@@ -102,7 +103,7 @@ func TestRecovery_PrimaryMissing_BackupExists(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "field_mappings")
+	path := filepath.Join(dir, "field_mappings.json")
 
 	// Create store with data
 	store, err := tsdb.NewFieldMappingStore(path)
@@ -112,24 +113,34 @@ func TestRecovery_PrimaryMissing_BackupExists(t *testing.T) {
 	if _, err := store.CreateFieldMapping("meas1", "temp"); err != nil {
 		t.Fatal(err)
 	}
-	// Second save to create .bak
+	// Second save to create .bak (backup contains only "temp")
 	if _, err := store.CreateFieldMapping("meas1", "humidity"); err != nil {
 		t.Fatal(err)
+	}
+
+	// Verify .bak exists before deleting primary
+	if _, err := os.Stat(path + ".bak"); os.IsNotExist(err) {
+		t.Fatal("expected .bak file to exist before test")
 	}
 
 	// Delete primary, leave backup
 	os.Remove(path)
 
-	// Reload — primary is missing, treated as empty store (no error)
+	// Reload — should recover from backup (no error)
 	store2, err := tsdb.NewFieldMappingStore(path)
 	if err != nil {
-		t.Fatalf("expected empty store when primary missing, got error: %v", err)
+		t.Fatalf("expected recovery from backup when primary missing, got error: %v", err)
 	}
 
-	// Should be empty — no auto-recovery from backup for missing files
+	// Backup had "temp" (from first save before backup was created)
 	_, found := store2.GetInternalFieldName("meas1", "temp")
-	if found {
-		t.Fatal("expected empty store after primary deletion")
+	if !found {
+		t.Fatal("expected temp to be recovered from backup")
+	}
+
+	// Primary file should have been restored
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Fatal("expected primary file to be restored after backup recovery")
 	}
 }
 
@@ -142,7 +153,7 @@ func TestRecovery_BackupContainsPreviousVersion(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "db_mappings.idx")
+	path := filepath.Join(dir, "db_mappings.json")
 
 	// First save: create "db1"
 	store, err := tsdb.NewDatabaseMappingStore(path)
@@ -187,7 +198,7 @@ func TestRecovery_SaveCreatesBackup(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "meas_mappings.idx")
+	path := filepath.Join(dir, "meas_mappings.json")
 
 	store, err := tsdb.NewMeasurementMappingStore(path)
 	if err != nil {
@@ -228,7 +239,7 @@ func TestRecovery_MeasurementStoreCorruptPrimary(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "meas_mappings.idx")
+	path := filepath.Join(dir, "meas_mappings.json")
 
 	store, err := tsdb.NewMeasurementMappingStore(path)
 	if err != nil {

@@ -16,7 +16,7 @@ func TestMeasurementMappingStore_RenameDropRecreate(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	path := filepath.Join(dir, "measurement_mappings.idx")
+	path := filepath.Join(dir, "measurement_mappings.json")
 	store, err := tsdb.NewMeasurementMappingStore(path)
 	if err != nil {
 		t.Fatal(err)

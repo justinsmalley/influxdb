@@ -19,7 +19,7 @@ func TestConcurrent_WriteDifferentMeasurements(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings"))
+	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestConcurrent_ReadWhileRename(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings"))
+	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestConcurrent_SimultaneousRenameToSameTarget(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings"))
+	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestConcurrent_DropAndRecreateSameField(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings"))
+	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestConcurrent_DeferredCreateAndSave(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings"))
+	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestConcurrent_DeferredCreateAndSave(t *testing.T) {
 	}
 
 	// Reload and verify all mappings persisted
-	store2, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings"))
+	store2, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
