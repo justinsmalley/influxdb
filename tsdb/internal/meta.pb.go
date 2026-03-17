@@ -113,12 +113,11 @@ func (m *Tag) GetValue() string {
 }
 
 type MeasurementFields struct {
-	Name                 []byte          `protobuf:"bytes,1,opt,name=Name,proto3" json:"Name,omitempty"`
-	Fields               []*Field        `protobuf:"bytes,2,rep,name=Fields,proto3" json:"Fields,omitempty"`
-	Mappings             []*FieldMapping `protobuf:"bytes,3,rep,name=Mappings,proto3" json:"Mappings,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}        `json:"-"`
-	XXX_unrecognized     []byte          `json:"-"`
-	XXX_sizecache        int32           `json:"-"`
+	Name                 []byte   `protobuf:"bytes,1,opt,name=Name,proto3" json:"Name,omitempty"`
+	Fields               []*Field `protobuf:"bytes,2,rep,name=Fields,proto3" json:"Fields,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
 }
 
 func (m *MeasurementFields) Reset()         { *m = MeasurementFields{} }
@@ -155,13 +154,6 @@ func (m *MeasurementFields) GetName() []byte {
 func (m *MeasurementFields) GetFields() []*Field {
 	if m != nil {
 		return m.Fields
-	}
-	return nil
-}
-
-func (m *MeasurementFields) GetMappings() []*FieldMapping {
-	if m != nil {
-		return m.Mappings
 	}
 	return nil
 }
@@ -212,52 +204,6 @@ func (m *Field) GetType() int32 {
 	return 0
 }
 
-type FieldMapping struct {
-	UserName             string   `protobuf:"bytes,1,opt,name=UserName,proto3" json:"UserName,omitempty"`
-	InternalName         string   `protobuf:"bytes,2,opt,name=InternalName,proto3" json:"InternalName,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
-}
-
-func (m *FieldMapping) Reset()         { *m = FieldMapping{} }
-func (m *FieldMapping) String() string { return proto.CompactTextString(m) }
-func (*FieldMapping) ProtoMessage()    {}
-func (*FieldMapping) Descriptor() ([]byte, []int) {
-	return fileDescriptor_59b0956366e72083, []int{4}
-}
-func (m *FieldMapping) XXX_Unmarshal(b []byte) error {
-	return xxx_messageInfo_FieldMapping.Unmarshal(m, b)
-}
-func (m *FieldMapping) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	return xxx_messageInfo_FieldMapping.Marshal(b, m, deterministic)
-}
-func (m *FieldMapping) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_FieldMapping.Merge(m, src)
-}
-func (m *FieldMapping) XXX_Size() int {
-	return xxx_messageInfo_FieldMapping.Size(m)
-}
-func (m *FieldMapping) XXX_DiscardUnknown() {
-	xxx_messageInfo_FieldMapping.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_FieldMapping proto.InternalMessageInfo
-
-func (m *FieldMapping) GetUserName() string {
-	if m != nil {
-		return m.UserName
-	}
-	return ""
-}
-
-func (m *FieldMapping) GetInternalName() string {
-	if m != nil {
-		return m.InternalName
-	}
-	return ""
-}
-
 type MeasurementFieldSet struct {
 	Measurements         []*MeasurementFields `protobuf:"bytes,1,rep,name=Measurements,proto3" json:"Measurements,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}             `json:"-"`
@@ -269,7 +215,7 @@ func (m *MeasurementFieldSet) Reset()         { *m = MeasurementFieldSet{} }
 func (m *MeasurementFieldSet) String() string { return proto.CompactTextString(m) }
 func (*MeasurementFieldSet) ProtoMessage()    {}
 func (*MeasurementFieldSet) Descriptor() ([]byte, []int) {
-	return fileDescriptor_59b0956366e72083, []int{5}
+	return fileDescriptor_59b0956366e72083, []int{4}
 }
 func (m *MeasurementFieldSet) XXX_Unmarshal(b []byte) error {
 	return xxx_messageInfo_MeasurementFieldSet.Unmarshal(m, b)
@@ -301,7 +247,6 @@ func init() {
 	proto.RegisterType((*Tag)(nil), "tsdb.Tag")
 	proto.RegisterType((*MeasurementFields)(nil), "tsdb.MeasurementFields")
 	proto.RegisterType((*Field)(nil), "tsdb.Field")
-	proto.RegisterType((*FieldMapping)(nil), "tsdb.FieldMapping")
 	proto.RegisterType((*MeasurementFieldSet)(nil), "tsdb.MeasurementFieldSet")
 }
 

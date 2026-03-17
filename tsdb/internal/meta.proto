@@ -23,17 +23,11 @@ message Tag {
 message MeasurementFields {
   bytes Name = 1;
   repeated Field Fields = 2;
-  repeated FieldMapping Mappings = 3;  // NEW
 }
 
 message Field {
   bytes Name = 1;
   int32 Type = 2;
-}
-
-message FieldMapping {
-  string UserName = 1;     // User-facing name
-  string InternalName = 2; // Internal storage name (seriesKey#!~#internalName)
 }
 
 message MeasurementFieldSet {

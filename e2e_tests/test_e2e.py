@@ -1286,9 +1286,11 @@ class TestMovingFunctionsAfterRename(unittest.TestCase):
             ],
             db=cls.DB,
         )
+        time.sleep(0.5)
 
         # Rename field "temp" -> "temperature".
-        query("RENAME FIELD temp TO temperature ON sensors", db=cls.DB, method="POST")
+        query("ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature", db=cls.DB, method="POST")
+        time.sleep(0.5)
 
     def _get_values(self, result):
         """Extract [[time, value], ...] from the first series of a query result."""
