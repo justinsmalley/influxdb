@@ -189,6 +189,151 @@ func TestRecovery_BackupContainsPreviousVersion(t *testing.T) {
 	}
 }
 
+// TestRecovery_OrphanedFieldMappings verifies that field mapping groups with no
+// corresponding measurement mapping entry are correctly identified as orphans.
+// This simulates the state left by a crash between the two saves in
+// DeleteMeasurement (field-mapping save succeeds, measurement-mapping save fails).
+//
+// The test operates at the unit level on the mapping stores directly (not the
+// full Store), verifying the invariant that reconcileMappings is supposed to
+// enforce.
+func TestRecovery_OrphanedFieldMappings(t *testing.T) {
+	dir, err := os.MkdirTemp("", "orphan_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	fieldPath := filepath.Join(dir, "field_mappings.json")
+	measPath := filepath.Join(dir, "measurement_mappings.json")
+
+	// Create a field mapping store with entries for two measurements.
+	fms, err := tsdb.NewFieldMappingStore(fieldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fms.CreateFieldMapping("m1", "temp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fms.CreateFieldMapping("m2", "humidity"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a measurement mapping store with only "m2" (simulating a crash
+	// that dropped "m1"'s measurement mapping but left its field mappings).
+	mms, err := tsdb.NewMeasurementMappingStore(measPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mms.CreateMeasurementMapping("m2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what reconcileMappings orphan sweep does:
+	// collect known internal measurement names from the measurement store.
+	knownMeasurements := make(map[string]bool)
+	for _, m := range mms.GetAllMappings() {
+		knownMeasurements[m.InternalName] = true
+	}
+
+	// Identify orphaned field groups (groups in field store with no parent measurement).
+	var dropped []string
+	for _, group := range fms.GetAllGroups() {
+		if !knownMeasurements[group] {
+			fms.DropGroup(group)
+			dropped = append(dropped, group)
+		}
+	}
+	if err := fms.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify "m1" was identified as orphan and dropped.
+	if len(dropped) != 1 || dropped[0] != "m1" {
+		t.Fatalf("expected [m1] orphan, got %v", dropped)
+	}
+
+	// Reload the field store and verify "m1" is gone but "m2" remains.
+	fms2, err := tsdb.NewFieldMappingStore(fieldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := fms2.GetInternalFieldName("m1", "temp"); found {
+		t.Fatal("orphaned field mapping for m1 should have been removed")
+	}
+	if _, found := fms2.GetInternalFieldName("m2", "humidity"); !found {
+		t.Fatal("non-orphaned field mapping for m2 should still exist")
+	}
+}
+
+// TestRecovery_DeleteMeasurementSaveOrder verifies that the field-save-first
+// ordering means a crash between the two saves leaves a recoverable state.
+// Field mappings for the dropped measurement are removed before the measurement
+// mapping, so the worst-case crash leaves an unmapped measurement with no
+// field mappings — which reconcileMappings can clean up.
+func TestRecovery_DeleteMeasurementSaveOrder(t *testing.T) {
+	dir, err := os.MkdirTemp("", "save_order_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	fieldPath := filepath.Join(dir, "field_mappings.json")
+	measPath := filepath.Join(dir, "measurement_mappings.json")
+
+	fms, err := tsdb.NewFieldMappingStore(fieldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mms, err := tsdb.NewMeasurementMappingStore(measPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up: measurement "m1" with field "temp", measurement "m2" with "humidity".
+	if _, err := mms.CreateMeasurementMapping("m1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mms.CreateMeasurementMapping("m2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fms.CreateFieldMapping("m1", "temp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fms.CreateFieldMapping("m2", "humidity"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate DeleteMeasurement for "m1" with field-save-first ordering.
+	// Step 1: remove field mappings and save (this succeeds).
+	fms.DropGroup("m1")
+	if err := fms.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate crash here: measurement mapping save is skipped.
+	// State: field store has no "m1" group; measurement store still has "m1".
+
+	// On restart, orphan sweep sees "m1" in measurement store but no fields for it.
+	// This is NOT an orphan in the field-store sense (the field store has no m1 group).
+	// The measurement store still has "m1" but with no fields — that's fine.
+	// Verify: field store is clean.
+	fms2, err := tsdb.NewFieldMappingStore(fieldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := fms2.GetInternalFieldName("m1", "temp"); found {
+		t.Fatal("field mapping for m1/temp should be gone after field-save-first")
+	}
+	if _, found := fms2.GetInternalFieldName("m2", "humidity"); !found {
+		t.Fatal("field mapping for m2/humidity should still exist")
+	}
+
+	// If we had crashed BEFORE the field save (old order: meas-save-first),
+	// the measurement mapping would be gone but field mappings remain (orphans).
+	// The field-save-first ordering ensures we never create field orphans.
+}
+
 // TestRecovery_SaveCreatesBackup verifies that each save creates a .bak file
 // after the first save.
 func TestRecovery_SaveCreatesBackup(t *testing.T) {

@@ -911,30 +911,32 @@ func (s *Store) DeleteDatabase(name string) error {
 	// Remove shared index for database if using inmem index.
 	delete(s.indexes, name)
 
-	// Remove field and measurement mapping stores from cache and disk
-	s.fieldMappingMu.Lock()
-	if store, exists := s.fieldMappingStores[name]; exists {
-		if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
-			s.fieldMappingMu.Unlock()
-			s.Logger.Error("failed to remove field mapping file", zap.String("path", store.path), zap.Error(err))
-			return err
+	// Remove field and measurement mapping stores from cache and disk.
+	// Always delete from the in-memory map regardless of file-remove errors so
+	// that the database is fully cleaned up even when the filesystem is broken.
+	func() {
+		s.fieldMappingMu.Lock()
+		defer s.fieldMappingMu.Unlock()
+		if store, exists := s.fieldMappingStores[name]; exists {
+			if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
+				s.Logger.Error("failed to remove field mapping file", zap.String("path", store.path), zap.Error(err))
+			}
+			os.Remove(store.path + ".bak")
+			delete(s.fieldMappingStores, name)
 		}
-		os.Remove(store.path + ".bak") // Remove backup if present
-		delete(s.fieldMappingStores, name)
-	}
-	s.fieldMappingMu.Unlock()
+	}()
 
-	s.measurementMappingMu.Lock()
-	if store, exists := s.measurementMappingStores[name]; exists {
-		if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
-			s.measurementMappingMu.Unlock()
-			s.Logger.Error("failed to remove measurement mapping file", zap.String("path", store.path), zap.Error(err))
-			return err
+	func() {
+		s.measurementMappingMu.Lock()
+		defer s.measurementMappingMu.Unlock()
+		if store, exists := s.measurementMappingStores[name]; exists {
+			if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
+				s.Logger.Error("failed to remove measurement mapping file", zap.String("path", store.path), zap.Error(err))
+			}
+			os.Remove(store.path + ".bak")
+			delete(s.measurementMappingStores, name)
 		}
-		os.Remove(store.path + ".bak") // Remove backup if present
-		delete(s.measurementMappingStores, name)
-	}
-	s.measurementMappingMu.Unlock()
+	}()
 
 	// Remove database from DatabaseMappingStore
 	s.databaseMappingMu.RLock()
@@ -1023,14 +1025,10 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 	if internal, isActive := measMappingStore.GetInternalMeasurementName(name); isActive {
 		internalName = internal
 	}
-	// Completely remove it from the mapping store instead of soft deleting.
-	// This guarantees the name is fully released for recreation.
-	measMappingStore.DropMappingsByInternalName("", internalName)
-	if err := measMappingStore.Save(); err != nil {
-		return fmt.Errorf("save measurement mapping after drop: %w", err)
-	}
-
-	// Also completely remove field mappings for this measurement.
+	// Save field mappings first, then measurement mappings. This order ensures
+	// that a crash between the two saves leaves an orphaned measurement entry
+	// (not orphaned field entries), which reconcileMappings can safely clean up
+	// on restart. The reverse order would leave unreachable field mappings.
 	fieldMappingStore, err := s.FieldMappingStore(database)
 	if err != nil {
 		return err
@@ -1038,6 +1036,13 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 	fieldMappingStore.DropGroup(internalName)
 	if err := fieldMappingStore.Save(); err != nil {
 		return fmt.Errorf("save field mapping after drop: %w", err)
+	}
+
+	// Completely remove it from the mapping store instead of soft deleting.
+	// This guarantees the name is fully released for recreation.
+	measMappingStore.DropMappingsByInternalName("", internalName)
+	if err := measMappingStore.Save(); err != nil {
+		return fmt.Errorf("save measurement mapping after drop: %w", err)
 	}
 
 	// Limit to 1 delete for each shard since expanding the measurement into the list
@@ -2376,6 +2381,30 @@ func (s *Store) reconcileMappings() error {
 		if err := fieldMappingStore.SaveIfDirty(); err != nil {
 			s.Logger.Warn("reconcile: failed to save field mappings",
 				zap.String("database", dbName), zap.Error(err))
+		}
+
+		// Orphan sweep: remove field mapping groups whose parent measurement no
+		// longer exists in the measurement mapping store. This cleans up state
+		// left by a crash between the two saves during DeleteMeasurement.
+		knownMeasurements := make(map[string]bool)
+		for _, m := range measMappingStore.GetAllMappings() {
+			knownMeasurements[m.InternalName] = true
+		}
+		var orphansDropped bool
+		for _, group := range fieldMappingStore.GetAllGroups() {
+			if !knownMeasurements[group] {
+				s.Logger.Info("reconcile: dropping orphaned field mappings",
+					zap.String("database", dbName),
+					zap.String("internal_measurement", group))
+				fieldMappingStore.DropGroup(group)
+				orphansDropped = true
+			}
+		}
+		if orphansDropped {
+			if err := fieldMappingStore.Save(); err != nil {
+				s.Logger.Warn("reconcile: failed to save field mappings after orphan sweep",
+					zap.String("database", dbName), zap.Error(err))
+			}
 		}
 	}
 

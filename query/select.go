@@ -280,97 +280,11 @@ func (b *exprIteratorBuilder) buildCallIterator(ctx context.Context, expr *influ
 			isNonNegative := (expr.Name == "non_negative_difference")
 			return newDifferenceIterator(input, opt, isNonNegative)
 		case "moving_average":
-			n := expr.Args[1].(*influxql.IntegerLiteral)
-			minPeriods := int(n.Val)
-			center := false
-
-			// Parse optional 3rd parameter (minPeriods)
-			if len(expr.Args) >= 3 {
-				if minPeriodsExpr, ok := expr.Args[2].(*influxql.IntegerLiteral); ok {
-					minPeriods = int(minPeriodsExpr.Val)
-				}
-			}
-
-			// Parse optional 4th parameter (center)
-			if len(expr.Args) >= 4 {
-				if centerExpr, ok := expr.Args[3].(*influxql.BooleanLiteral); ok {
-					center = centerExpr.Val
-				}
-			}
-
-			// Calculate time range padding
-			if n.Val > 1 && !opt.Interval.IsZero() {
-				// Window span: windowSize-1 intervals
-				windowSpan := int64(n.Val-1) * int64(opt.Interval.Duration)
-				padding := windowSpan
-
-				if center {
-					// For centered windows, we need future data to calculate the window
-					// Then we'll time-shift the results backward and filter
-					// Expand both start and end to get future data
-					if opt.Ascending {
-						opt.StartTime -= padding
-						opt.EndTime += padding
-					} else {
-						opt.EndTime += padding
-						opt.StartTime -= padding
-					}
-				} else {
-					// Trailing window: only need data before
-					if opt.Ascending {
-						opt.StartTime -= padding
-					} else {
-						opt.EndTime += padding
-					}
-				}
-			}
-			return newMovingAverageIterator(input, int(n.Val), minPeriods, center, opt)
+			n, minPeriods, center := parseMovingWindowArgs(expr, &opt)
+			return newMovingAverageIterator(input, n, minPeriods, center, opt)
 		case "moving_median":
-			n := expr.Args[1].(*influxql.IntegerLiteral)
-			minPeriods := int(n.Val)
-			center := false
-
-			// Parse optional 3rd parameter (minPeriods)
-			if len(expr.Args) >= 3 {
-				if minPeriodsExpr, ok := expr.Args[2].(*influxql.IntegerLiteral); ok {
-					minPeriods = int(minPeriodsExpr.Val)
-				}
-			}
-
-			// Parse optional 4th parameter (center)
-			if len(expr.Args) >= 4 {
-				if centerExpr, ok := expr.Args[3].(*influxql.BooleanLiteral); ok {
-					center = centerExpr.Val
-				}
-			}
-
-			// Calculate time range padding
-			if n.Val > 1 && !opt.Interval.IsZero() {
-				// Window span: windowSize-1 intervals
-				windowSpan := int64(n.Val-1) * int64(opt.Interval.Duration)
-				padding := windowSpan
-
-				if center {
-					// For centered windows, we need future data to calculate the window
-					// Then we'll time-shift the results backward and filter
-					// Expand both start and end to get future data
-					if opt.Ascending {
-						opt.StartTime -= padding
-						opt.EndTime += padding
-					} else {
-						opt.EndTime += padding
-						opt.StartTime -= padding
-					}
-				} else {
-					// Trailing window: only need data before
-					if opt.Ascending {
-						opt.StartTime -= padding
-					} else {
-						opt.EndTime += padding
-					}
-				}
-			}
-			return newMovingMedianIterator(input, int(n.Val), minPeriods, center, opt)
+			n, minPeriods, center := parseMovingWindowArgs(expr, &opt)
+			return newMovingMedianIterator(input, n, minPeriods, center, opt)
 		case "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative":
 			n := expr.Args[1].(*influxql.IntegerLiteral)
 			if n.Val > 1 && !opt.Interval.IsZero() {
@@ -652,6 +566,47 @@ func (b *exprIteratorBuilder) buildCallIterator(ctx context.Context, expr *influ
 		itr = NewInterruptIterator(itr, opt.InterruptCh)
 	}
 	return itr, nil
+}
+
+// parseMovingWindowArgs parses the windowSize, minPeriods, and center flag
+// from a moving_average or moving_median call expression, then applies the
+// appropriate time range padding to opt. The call is expected to have already
+// passed compile-time validation.
+func parseMovingWindowArgs(call *influxql.Call, opt *IteratorOptions) (n, minPeriods int, center bool) {
+	nLit := call.Args[1].(*influxql.IntegerLiteral)
+	n = int(nLit.Val)
+	minPeriods = n
+
+	if len(call.Args) >= 3 {
+		if mp, ok := call.Args[2].(*influxql.IntegerLiteral); ok {
+			minPeriods = int(mp.Val)
+		}
+	}
+	if len(call.Args) >= 4 {
+		if c, ok := call.Args[3].(*influxql.BooleanLiteral); ok {
+			center = c.Val
+		}
+	}
+
+	if nLit.Val > 1 && !opt.Interval.IsZero() {
+		intervalNS := int64(opt.Interval.Duration)
+		if center {
+			// Asymmetric padding: floor((N-1)/2) before, ceil((N-1)/2) after.
+			startPad := int64((nLit.Val-1)/2) * intervalNS
+			endPad := int64(nLit.Val/2) * intervalNS
+			opt.StartTime -= startPad
+			opt.EndTime += endPad
+		} else {
+			// Trailing window: only need data before the current result point.
+			padding := int64(nLit.Val-1) * intervalNS
+			if opt.Ascending {
+				opt.StartTime -= padding
+			} else {
+				opt.EndTime += padding
+			}
+		}
+	}
+	return n, minPeriods, center
 }
 
 func (b *exprIteratorBuilder) callIterator(ctx context.Context, expr *influxql.Call, opt IteratorOptions) (Iterator, error) {

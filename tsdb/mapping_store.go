@@ -335,9 +335,13 @@ func (s *GenericMappingStore) MarshalAndSave(marshalFunc func() ([]byte, error),
 
 	// 4. Atomic rename temp to current
 	if err := os.Rename(tempFile, s.path); err != nil {
-		// Try to restore from backup
+		// Try to restore from backup; if that also fails, surface both errors
+		// so the operator knows the store is in an unreadable state.
 		if _, statErr := os.Stat(backupFile); statErr == nil {
-			os.Rename(backupFile, s.path)
+			if restoreErr := os.Rename(backupFile, s.path); restoreErr != nil {
+				os.Remove(tempFile)
+				return fmt.Errorf("rename temp to mapping file: %w; also failed to restore backup: %v", err, restoreErr)
+			}
 		}
 		os.Remove(tempFile)
 		return fmt.Errorf("rename temp to mapping file: %w", err)

@@ -566,45 +566,62 @@ func (c *compiledField) compileCumulativeSum(args []influxql.Expr) error {
 	}
 }
 
-func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
+// compileMovingWindowArgs parses and validates the shared arguments for
+// moving_average and moving_median: windowSize (arg1), optional minPeriods
+// (arg2), and optional center flag (arg3). Returns the parsed values or an
+// error. The name parameter is used in error messages.
+func compileMovingWindowArgs(name string, args []influxql.Expr) (windowSize int64, minPeriods int64, center bool, err error) {
 	if got := len(args); got < 2 || got > 4 {
-		return fmt.Errorf("invalid number of arguments for moving_average, expected 2-4, got %d", got)
+		return 0, 0, false, fmt.Errorf("invalid number of arguments for %s, expected 2-4, got %d", name, got)
 	}
 
 	arg1, ok := args[1].(*influxql.IntegerLiteral)
 	if !ok {
-		return fmt.Errorf("second argument for moving_average must be an integer, got %T", args[1])
+		return 0, 0, false, fmt.Errorf("second argument for %s must be an integer, got %T", name, args[1])
 	} else if arg1.Val <= 1 {
-		return fmt.Errorf("moving_average window must be greater than 1, got %d", arg1.Val)
+		return 0, 0, false, fmt.Errorf("%s window must be greater than 1, got %d", name, arg1.Val)
 	}
+	windowSize = arg1.Val
+	minPeriods = arg1.Val // default: require full window
 
-	// Validate optional minPeriods (3rd argument)
 	if len(args) >= 3 {
 		arg2, ok := args[2].(*influxql.IntegerLiteral)
 		if !ok {
-			return fmt.Errorf("third argument for moving_average must be an integer, got %T", args[2])
+			return 0, 0, false, fmt.Errorf("third argument for %s must be an integer, got %T", name, args[2])
 		}
 		if arg2.Val < 1 {
-			return fmt.Errorf("moving_average minPeriods must be at least 1, got %d", arg2.Val)
+			return 0, 0, false, fmt.Errorf("%s minPeriods must be at least 1, got %d", name, arg2.Val)
 		}
+		if arg2.Val > arg1.Val {
+			return 0, 0, false, fmt.Errorf("%s minPeriods (%d) must not exceed windowSize (%d)", name, arg2.Val, arg1.Val)
+		}
+		minPeriods = arg2.Val
+	}
+
+	if len(args) >= 4 {
+		if centerExpr, ok := args[3].(*influxql.BooleanLiteral); ok {
+			center = centerExpr.Val
+		}
+	}
+	return windowSize, minPeriods, center, nil
+}
+
+func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
+	windowSize, _, center, err := compileMovingWindowArgs("moving_average", args)
+	if err != nil {
+		return err
 	}
 
 	c.global.OnlySelectors = false
 
-	// Calculate ExtraIntervals based on center flag
-	extraIntervals := int(arg1.Val)
-	if len(args) >= 4 {
-		// Fourth argument is center flag
-		if centerExpr, ok := args[3].(*influxql.BooleanLiteral); ok && centerExpr.Val {
-			// Centered window: use half the window size for padding
-			extraIntervals = int(arg1.Val) / 2
-		}
+	extraIntervals := int(windowSize)
+	if center {
+		extraIntervals = int(windowSize) / 2
 	}
 	if c.global.ExtraIntervals < extraIntervals {
 		c.global.ExtraIntervals = extraIntervals
 	}
 
-	// Must be a variable reference, function, wildcard, or regexp.
 	switch arg0 := args[0].(type) {
 	case *influxql.Call:
 		if c.global.Interval.IsZero() {
@@ -620,44 +637,21 @@ func (c *compiledField) compileMovingAverage(args []influxql.Expr) error {
 }
 
 func (c *compiledField) compileMovingMedian(args []influxql.Expr) error {
-	if got := len(args); got < 2 || got > 4 {
-		return fmt.Errorf("invalid number of arguments for moving_median, expected 2-4, got %d", got)
-	}
-
-	arg1, ok := args[1].(*influxql.IntegerLiteral)
-	if !ok {
-		return fmt.Errorf("second argument for moving_median must be an integer, got %T", args[1])
-	} else if arg1.Val <= 1 {
-		return fmt.Errorf("moving_median window must be greater than 1, got %d", arg1.Val)
-	}
-
-	// Validate optional minPeriods (3rd argument)
-	if len(args) >= 3 {
-		arg2, ok := args[2].(*influxql.IntegerLiteral)
-		if !ok {
-			return fmt.Errorf("third argument for moving_median must be an integer, got %T", args[2])
-		}
-		if arg2.Val < 1 {
-			return fmt.Errorf("moving_median minPeriods must be at least 1, got %d", arg2.Val)
-		}
+	windowSize, _, center, err := compileMovingWindowArgs("moving_median", args)
+	if err != nil {
+		return err
 	}
 
 	c.global.OnlySelectors = false
 
-	// Calculate ExtraIntervals based on center flag
-	extraIntervals := int(arg1.Val)
-	if len(args) >= 4 {
-		// Fourth argument is center flag
-		if centerExpr, ok := args[3].(*influxql.BooleanLiteral); ok && centerExpr.Val {
-			// Centered window: use half the window size for padding
-			extraIntervals = int(arg1.Val) / 2
-		}
+	extraIntervals := int(windowSize)
+	if center {
+		extraIntervals = int(windowSize) / 2
 	}
 	if c.global.ExtraIntervals < extraIntervals {
 		c.global.ExtraIntervals = extraIntervals
 	}
 
-	// Must be a variable reference, function, wildcard, or regexp.
 	switch arg0 := args[0].(type) {
 	case *influxql.Call:
 		if c.global.Interval.IsZero() {

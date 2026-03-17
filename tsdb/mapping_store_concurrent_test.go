@@ -264,6 +264,72 @@ func TestConcurrent_DropAndRecreateSameField(t *testing.T) {
 	}
 }
 
+// TestRenameChain_MultiStep verifies that a multi-step rename chain (A→B→C)
+// correctly preserves the internal name through the chain. This mirrors what
+// the e2e test test_06_complex_field_renames covers end-to-end, but at the
+// unit level for faster feedback.
+func TestRenameChain_MultiStep(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rename_chain_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	store, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create initial field "A" → internal name is also "A" (identity).
+	internal0, err := store.CreateFieldMapping("cpu", "A")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rename A → B. Internal name must stay the same (the original "A").
+	if err := store.RenameField("cpu", "A", "B"); err != nil {
+		t.Fatalf("rename A→B: %v", err)
+	}
+	internalAfterAB, found := store.GetInternalFieldName("cpu", "B")
+	if !found {
+		t.Fatal("expected B to exist after A→B rename")
+	}
+	if internalAfterAB != internal0 {
+		t.Errorf("internal name changed after A→B rename: expected %q, got %q", internal0, internalAfterAB)
+	}
+	if _, found := store.GetInternalFieldName("cpu", "A"); found {
+		t.Fatal("A should not exist after rename to B")
+	}
+
+	// Rename B → C. Internal name must still be the original "A".
+	if err := store.RenameField("cpu", "B", "C"); err != nil {
+		t.Fatalf("rename B→C: %v", err)
+	}
+	internalAfterBC, found := store.GetInternalFieldName("cpu", "C")
+	if !found {
+		t.Fatal("expected C to exist after B→C rename")
+	}
+	if internalAfterBC != internal0 {
+		t.Errorf("internal name changed after B→C rename: expected %q, got %q", internal0, internalAfterBC)
+	}
+	if _, found := store.GetInternalFieldName("cpu", "B"); found {
+		t.Fatal("B should not exist after rename to C")
+	}
+
+	// Persist and reload; verify the chain is durable.
+	store2, err := tsdb.NewFieldMappingStore(filepath.Join(dir, "field_mappings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	internalAfterReload, found := store2.GetInternalFieldName("cpu", "C")
+	if !found {
+		t.Fatal("C not found after reload")
+	}
+	if internalAfterReload != internal0 {
+		t.Errorf("internal name not preserved after reload: expected %q, got %q", internal0, internalAfterReload)
+	}
+}
+
 // TestConcurrent_DeferredCreateAndSave verifies that deferred creates from
 // multiple goroutines followed by a single SaveIfDirty don't lose data.
 func TestConcurrent_DeferredCreateAndSave(t *testing.T) {

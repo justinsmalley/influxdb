@@ -2220,3 +2220,131 @@ func dirExists(path string) bool {
 	}
 	return !os.IsNotExist(err)
 }
+
+// Test-1: DeleteDatabase must always release fieldMappingMu and
+// measurementMappingMu, and must always remove the in-memory cache entry
+// regardless of file-remove errors.
+func TestStore_DeleteDatabase_MappingStoreCleanup(t *testing.T) {
+	t.Parallel()
+
+	test := func(index string) {
+		s := MustOpenStore(index)
+		defer s.Close()
+
+		// Create a shard to register the database.
+		if err := s.CreateShard("db0", "rp0", 1, true); err != nil {
+			t.Fatal(err)
+		}
+		// Force-initialize the mapping stores for db0 so they appear in the cache.
+		fms, err := s.FieldMappingStore("db0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fms.CreateFieldMapping("m1", "temp"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.MeasurementMappingStore("db0"); err != nil {
+			t.Fatal(err)
+		}
+
+		// Delete the database; should succeed and clean up the in-memory cache.
+		if err := s.DeleteDatabase("db0"); err != nil {
+			t.Fatalf("DeleteDatabase failed: %v", err)
+		}
+
+		// Verify in-memory cleanup: calling FieldMappingStore for the same
+		// database must now return a fresh store with no mappings.
+		fms2, err := s.FieldMappingStore("db0")
+		if err != nil {
+			t.Fatalf("FieldMappingStore after delete failed: %v", err)
+		}
+		if fms2 == fms {
+			t.Fatal("expected a fresh FieldMappingStore, got the same cached instance")
+		}
+		// The deleted database's directory is gone, so the fresh store has no mappings.
+		if _, found := fms2.GetInternalFieldName("m1", "temp"); found {
+			t.Fatal("expected no field mappings in fresh store after database deletion")
+		}
+
+		// Verify the mutex is released by acquiring it via a second database.
+		if err := s.CreateShard("db1", "rp0", 2, true); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if _, err := s.FieldMappingStore("db1"); err != nil {
+				t.Errorf("FieldMappingStore(db1) after delete of db0: %v", err)
+			}
+		}()
+		select {
+		case <-done:
+			// success: mutex was not permanently locked
+		case <-time.After(5 * time.Second):
+			t.Fatal("deadlock: FieldMappingStore(db1) did not return after DeleteDatabase(db0)")
+		}
+	}
+
+	for _, index := range tsdb.RegisteredIndexes() {
+		t.Run(index, func(t *testing.T) { test(index) })
+	}
+}
+
+// TestStore_DeleteDatabase_ConcurrentMappingStoreAccess verifies that
+// concurrent access to mapping stores on different databases during
+// DeleteDatabase does not deadlock.
+func TestStore_DeleteDatabase_ConcurrentMappingStoreAccess(t *testing.T) {
+	t.Parallel()
+
+	test := func(index string) {
+		s := MustOpenStore(index)
+		defer s.Close()
+
+		for _, db := range []string{"db0", "db1"} {
+			rp := "rp0"
+			shardID := uint64(1)
+			if db == "db1" {
+				shardID = 2
+			}
+			if err := s.CreateShard(db, rp, shardID, true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.FieldMappingStore(db); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Concurrently delete db0 and access mapping store for db1.
+		errs := make(chan error, 2)
+		go func() {
+			if err := s.DeleteDatabase("db0"); err != nil {
+				errs <- fmt.Errorf("DeleteDatabase: %v", err)
+			} else {
+				errs <- nil
+			}
+		}()
+		go func() {
+			if _, err := s.FieldMappingStore("db1"); err != nil {
+				errs <- fmt.Errorf("FieldMappingStore: %v", err)
+			} else {
+				errs <- nil
+			}
+		}()
+
+		timeout := time.After(5 * time.Second)
+		for i := 0; i < 2; i++ {
+			select {
+			case err := <-errs:
+				if err != nil {
+					t.Error(err)
+				}
+			case <-timeout:
+				t.Fatal("deadlock detected: operations did not complete within 5 seconds")
+			}
+		}
+	}
+
+	for _, index := range tsdb.RegisteredIndexes() {
+		t.Run(index, func(t *testing.T) { test(index) })
+	}
+}

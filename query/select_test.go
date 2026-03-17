@@ -2645,6 +2645,82 @@ func TestSelect(t *testing.T) {
 				{Time: 12 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(11)}},
 			},
 		},
+		// Test-6: moving_median integration tests (Float, Integer, Unsigned)
+		{
+			name: "MovingMedian_Float",
+			q:    `SELECT moving_median(value, 3) FROM cpu WHERE time >= '1970-01-01T00:00:00Z' AND time < '1970-01-01T00:00:16Z'`,
+			typ:  influxql.Float,
+			itrs: []query.Iterator{
+				&FloatIterator{Points: []query.FloatPoint{
+					{Name: "cpu", Time: 0 * Second, Value: 20},
+					{Name: "cpu", Time: 4 * Second, Value: 10},
+					{Name: "cpu", Time: 8 * Second, Value: 30},
+					{Name: "cpu", Time: 12 * Second, Value: 15},
+				}},
+			},
+			rows: []query.Row{
+				// At 8s: [20,10,30] sorted = [10,20,30], median=20
+				{Time: 8 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(20)}},
+				// At 12s: [10,30,15] sorted = [10,15,30], median=15
+				{Time: 12 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(15)}},
+			},
+		},
+		{
+			name: "MovingMedian_Integer",
+			q:    `SELECT moving_median(value, 3) FROM cpu WHERE time >= '1970-01-01T00:00:00Z' AND time < '1970-01-01T00:00:16Z'`,
+			typ:  influxql.Integer,
+			itrs: []query.Iterator{
+				&IntegerIterator{Points: []query.IntegerPoint{
+					{Name: "cpu", Time: 0 * Second, Value: 20},
+					{Name: "cpu", Time: 4 * Second, Value: 10},
+					{Name: "cpu", Time: 8 * Second, Value: 30},
+					{Name: "cpu", Time: 12 * Second, Value: 15},
+				}},
+			},
+			rows: []query.Row{
+				{Time: 8 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(20)}},
+				{Time: 12 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(15)}},
+			},
+		},
+		{
+			name: "MovingMedian_Unsigned",
+			q:    `SELECT moving_median(value, 3) FROM cpu WHERE time >= '1970-01-01T00:00:00Z' AND time < '1970-01-01T00:00:16Z'`,
+			typ:  influxql.Unsigned,
+			itrs: []query.Iterator{
+				&UnsignedIterator{Points: []query.UnsignedPoint{
+					{Name: "cpu", Time: 0 * Second, Value: 20},
+					{Name: "cpu", Time: 4 * Second, Value: 10},
+					{Name: "cpu", Time: 8 * Second, Value: 30},
+					{Name: "cpu", Time: 12 * Second, Value: 15},
+				}},
+			},
+			rows: []query.Row{
+				{Time: 8 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(20)}},
+				{Time: 12 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(15)}},
+			},
+		},
+		// Test-6: moving_median with minPeriods < windowSize
+		{
+			name: "MovingMedian_Float_MinPeriods",
+			q:    `SELECT moving_median(value, 3, 2) FROM cpu WHERE time >= '1970-01-01T00:00:00Z' AND time < '1970-01-01T00:00:16Z'`,
+			typ:  influxql.Float,
+			itrs: []query.Iterator{
+				&FloatIterator{Points: []query.FloatPoint{
+					{Name: "cpu", Time: 0 * Second, Value: 20},
+					{Name: "cpu", Time: 4 * Second, Value: 10},
+					{Name: "cpu", Time: 8 * Second, Value: 30},
+					{Name: "cpu", Time: 12 * Second, Value: 15},
+				}},
+			},
+			rows: []query.Row{
+				// At 4s: [20,10] minPeriods=2 met → median = midpoint = 15
+				{Time: 4 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(15)}},
+				// At 8s: [20,10,30] → median=20
+				{Time: 8 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(20)}},
+				// At 12s: [10,30,15] → median=15
+				{Time: 12 * Second, Series: query.Series{Name: "cpu"}, Values: []interface{}{float64(15)}},
+			},
+		},
 		{
 			name: "CumulativeSum_Float",
 			q:    `SELECT cumulative_sum(value) FROM cpu WHERE time >= '1970-01-01T00:00:00Z' AND time < '1970-01-01T00:00:16Z'`,

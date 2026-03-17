@@ -311,6 +311,11 @@ func TestCompile_Failures(t *testing.T) {
 		{s: `SELECT moving_median(field1, 5, 0) FROM myseries`, err: `moving_median minPeriods must be at least 1, got 0`},
 		{s: `SELECT moving_median(field1, 5, -1) FROM myseries`, err: `moving_median minPeriods must be at least 1, got -1`},
 		{s: `SELECT moving_median(field1, 5, 2.0) FROM myseries`, err: `third argument for moving_median must be an integer, got *influxql.NumberLiteral`},
+		// Test-5: minPeriods > windowSize must be a compile-time error
+		{s: `SELECT moving_average(field1, 3, 5) FROM myseries`, err: `moving_average minPeriods (5) must not exceed windowSize (3)`},
+		{s: `SELECT moving_average(field1, 3, 4) FROM myseries`, err: `moving_average minPeriods (4) must not exceed windowSize (3)`},
+		{s: `SELECT moving_median(field1, 3, 5) FROM myseries`, err: `moving_median minPeriods (5) must not exceed windowSize (3)`},
+		{s: `SELECT moving_median(field1, 3, 4) FROM myseries`, err: `moving_median minPeriods (4) must not exceed windowSize (3)`},
 		{s: `SELECT cumulative_sum(field1), field1 FROM myseries`, err: `mixing aggregate and non-aggregate queries is not supported`},
 		{s: `SELECT cumulative_sum() from myseries`, err: `invalid number of arguments for cumulative_sum, expected 1, got 0`},
 		{s: `SELECT cumulative_sum(value) FROM myseries group by time(1h)`, err: `aggregate function required inside the call to cumulative_sum`},
