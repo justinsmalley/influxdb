@@ -24,206 +24,157 @@ This implementation adds field renaming and soft deletion capabilities to Influx
 
 ## Compilation
 
-### Prerequisites
+See **[README_DOCKER.md](README_DOCKER.md)** for the full build workflow.
 
-- Go 1.10+ (InfluxDB 1.7.11 was originally built with Go 1.10)
-- Docker for testing
-
-### Step 1: Compile influxql Library
-
-The `influxql` library must be compiled first as it's a dependency:
+Quick reference (from repo root):
 
 ```bash
-cd /Users/justinsmalley/Codebase/other/influxql
-go build ./...
-```
+# Compile influxql dependency
+cd influxql && go build ./... && cd ..
 
-This compiles:
-- `ast.go` - AST node definitions including `ShowFieldMappingsStatement`
-- `parser.go` - Parser including `parseShowFieldMappingsStatement`
-- `token.go` - Token definitions including `MAPPINGS`
-- `parse_tree.go` - Statement routing including `SHOW FIELD MAPPINGS`
+# Compile influxdb (local macOS binary)
+cd influxdb
+go mod download
+CGO_ENABLED=0 go build -ldflags="-s -w" -o influxd ./cmd/influxd
 
-### Step 2: Compile InfluxDB
-
-```bash
-cd /Users/justinsmalley/Codebase/other/influxdb
-
-# Compile for Linux (for Docker)
+# Compile for Linux/Docker
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/influxd-linux-amd64 ./cmd/influxd
-
-# Or compile for local testing (macOS/Darwin)
-go build -ldflags="-s -w" -o influxd ./cmd/influxd
 ```
 
-**Compilation Flags:**
-- `GOOS=linux GOARCH=amd64` - Target Linux x86_64 for Docker
-- `CGO_ENABLED=0` - Disable CGO for static binary
-- `-ldflags="-s -w"` - Strip debug symbols and reduce binary size
+## Docker Testing
 
-### Step 3: Check for Compilation Errors
+See **[README_DOCKER.md](README_DOCKER.md)** for the current build and testing workflow.
+The recommended approach uses `docker build -f influxdb/Dockerfile.local` rather than
+manually copying binaries into a running container.
 
-If you see errors about `ShowFieldMappingsStatement` or `MAPPINGS`:
-1. Ensure `influxql` library is compiled first
-2. Check that `go.mod` in influxdb references the local influxql: `replace github.com/influxdata/influxql => ../influxql`
+## Behavioral Specification
 
-## Docker Testing Setup
+All scenarios are covered by the E2E test suite (`e2e_tests/test_e2e.py`). The **Core Principle** governing all renames: `RENAME <old_name> TO <new_name>` will **FAIL** if `<new_name>` is currently an active user name. If `<new_name>` is inactive (previously dropped or renamed away), the operation will **SUCCEED** and the name is reclaimed.
 
-### Container Configuration
+### Scenario 1: Swapping Names via a Temporary Name
+*Tested in: `test_06_complex_field_renames`*
 
-- **Container Name**: `influxdb-modified`
-- **Image**: `influxdb:1.7.11`
-- **Port**: `8086`
-- **Data Volume**: `/var/lib/influxdb`
-- **Database**: `testdb` (for testing)
-- **Additional DBs**: `fresh_db` (for fresh tests)
+**Initial State:**
+* Internal Name `a` -> User Name `a` (Active)
+* Internal Name `b` -> User Name `b` (Active)
 
-### Step 1: Run Docker Container
+**`RENAME FIELD a TO b`** — **FAILS**. User Name `b` is currently active.
 
-```bash
-docker run -d \
-  --name influxdb-modified \
-  -p 8086:8086 \
-  -e INFLUXDB_DB=testdb \
-  influxdb:1.7.11
-```
+**`RENAME FIELD a TO tmp`** — **SUCCESS**.
+* Internal Name `a` -> User Name `tmp` (Active)
+* Internal Name `b` -> User Name `b` (Active)
 
-### Step 2: Copy Compiled Binary
+**`RENAME FIELD b TO a`** — **SUCCESS** (User Name `a` is now inactive).
+* Internal Name `a` -> User Name `tmp` (Active)
+* Internal Name `b` -> User Name `a` (Active)
 
-```bash
-docker cp /tmp/influxd-linux-amd64 influxdb-modified:/usr/bin/influxd
-```
+**`RENAME FIELD tmp TO b`** — **SUCCESS** (User Name `b` is now inactive).
+* Internal Name `a` -> User Name `b` (Active)
+* Internal Name `b` -> User Name `a` (Active)
 
-### Step 3: Restart Container
+---
 
-```bash
-docker restart influxdb-modified
-sleep 10  # Wait for InfluxDB to start
-```
+### Scenario 2: Reclaiming a Dropped Name
+*Tested in: `test_04_complex_measurement_renames` and `test_07_mapping_deletion_resolution`*
 
-### Step 4: Verify Installation
+**Initial State:** Internal Name `old_sensor` -> User Name `old_sensor` (Active)
 
-```bash
-docker exec influxdb-modified influx -version
-# Should show: InfluxDB shell version: 1.7.11
-```
+**`DROP FIELD old_sensor`** — **SUCCESS**. Internal Name `old_sensor` has no current user name (slot reusable with `.v2` suffix).
 
-## Testing Field Operations
+**Write new data to `old_sensor`** — **SUCCESS**.
+* Internal Name `old_sensor` -> no current user name
+* Internal Name `old_sensor.v2` -> User Name `old_sensor` (Active)
 
-### Test 1: Basic Field Rename
+*If `old_sensor.v2` is later dropped and the name reused, the next internal name becomes `old_sensor.v3`, etc.*
 
-```bash
-# Insert data with field 'temperature'
-docker exec influxdb-modified influx -database testdb -execute \
-  "INSERT environmental_sensors temperature=72.5,humidity=45"
+---
 
-# Rename field
-docker exec influxdb-modified influx -database testdb -execute \
-  "ALTER MEASUREMENT environmental_sensors RENAME FIELD temperature TO Air_Temperature"
+### Scenario 3: Chain Renaming
+*Tested in: `test_04_complex_measurement_renames` and `test_06_complex_field_renames`*
 
-# Verify rename
-docker exec influxdb-modified influx -database testdb -execute \
-  "SHOW FIELD KEYS FROM environmental_sensors"
-# Should show: Air_Temperature (not temperature)
+**Initial State:** Internal Name `temp` -> User Name `temp` (Active)
 
-# Query with new name
-docker exec influxdb-modified influx -database testdb -execute \
-  "SELECT Air_Temperature FROM environmental_sensors"
-# Should return data
+**`RENAME FIELD temp TO temperature`** → **`RENAME FIELD temperature TO heat`** — **SUCCESS**. Result: Internal Name `temp` -> User Name `heat` (Active).
 
-# Query with old name (should fail or return empty)
-docker exec influxdb-modified influx -database testdb -execute \
-  "SELECT temperature FROM environmental_sensors"
-# Should return empty or no data
-```
+**`SELECT heat FROM sensors`** → returns data (resolves `heat` → internal `temp`).
+**`SELECT temp FROM sensors`** → no data (old user name is inactive).
 
-### Test 2: Soft Field Deletion
+---
 
-```bash
-# Insert data with field 'co2_level'
-docker exec influxdb-modified influx -database testdb -execute \
-  "INSERT environmental_sensors co2_level=400"
+### Scenario 4: Consolidating/Merging (Intentional Failure)
+*Tested in: `test_04_complex_measurement_renames` and `test_06_complex_field_renames`*
 
-# Delete field
-docker exec influxdb-modified influx -database testdb -execute \
-  "DROP FIELD co2_level FROM environmental_sensors"
+**`RENAME FIELD status_code TO statusCode`** — **FAILS** when `statusCode` is already Active. Renames are 1:1 mapping updates and cannot merge physical data.
 
-# Verify deletion
-docker exec influxdb-modified influx -database testdb -execute \
-  "SHOW FIELD KEYS FROM environmental_sensors"
-# Should NOT show co2_level
+---
 
-# Query with deleted field (should return empty)
-docker exec influxdb-modified influx -database testdb -execute \
-  "SELECT co2_level FROM environmental_sensors"
-# Should return empty
+### Scenario 5: Regex Queries with Mappings
+*Tested in: `test_08_regex_with_multiple_mappings`*
 
-# Show mappings
-docker exec influxdb-modified influx -database testdb -execute \
-  "SHOW FIELD MAPPINGS FROM environmental_sensors"
-# Shows only active mappings (measurement, user_name, internal_name). Dropped fields are not listed.
-```
+**Initial State:**
+* Internal Name `field_1` -> User Name `other_field` (Active)
+* Internal Name `field_2` -> User Name `field_2` (Active)
 
-### Test 3: Re-create Deleted Field
+**`SELECT /field_.*/ FROM sensors`** → matches only `field_2`. Internal name `field_1` is ignored because its active User Name `other_field` does not match the regex.
 
-```bash
-# After deleting a field, insert data with same name
-docker exec influxdb-modified influx -database testdb -execute \
-  "INSERT environmental_sensors co2_level=500"
+**`SELECT /other_.*/ FROM sensors`** → matches `other_field` successfully.
 
-# Show mappings
-docker exec influxdb-modified influx -database testdb -execute \
-  "SHOW FIELD MAPPINGS FROM environmental_sensors"
-# Should show one active mapping: user_name=co2_level, internal_name=co2_level.v2
+---
 
-# Query should return new data
-docker exec influxdb-modified influx -database testdb -execute \
-  "SELECT co2_level FROM environmental_sensors"
-# Should return data from co2_level.v2
-```
+### Scenario 6: Database Renaming & Cache Clearing
+*Tested in: `test_09_mapping_cache_clear_on_drop_db` and `test_10_database_renaming`*
 
-### Test 4: SHOW FIELD MAPPINGS
+**`ALTER DATABASE old_db RENAME TO new_db`** — **SUCCESS**. Queries to `old_db` return "database not found"; all traffic uses `new_db`.
 
-```bash
-# Show all mappings
-docker exec influxdb-modified influx -database testdb -execute \
-  "SHOW FIELD MAPPINGS"
+**`DROP DATABASE new_db`** — **SUCCESS**. Entirely evicts the mapping cache and data for `old_db`/`new_db`; if `old_db` is recreated, it starts with a clean slate.
 
-# Show mappings for specific measurement
-docker exec influxdb-modified influx -database testdb -execute \
-  "SHOW FIELD MAPPINGS FROM environmental_sensors"
-```
+**`DROP MEASUREMENT some_measurement`** — **SUCCESS**. Drops the measurement mapping and deletes all associated field mappings from memory and disk.
 
-### Test 5: Complex Scenario
+---
 
-```bash
-# Create fresh database for complex test
-docker exec influxdb-modified influx -execute "CREATE DATABASE fresh_db"
+### Scenario 7: Field Ops on a Renamed Measurement
+*Tested in: `test_12_field_ops_on_renamed_measurement`*
 
-# Step 1: Insert initial field
-docker exec influxdb-modified influx -database fresh_db -execute \
-  "INSERT test temperature=100"
+After `ALTER MEASUREMENT m1 RENAME TO m2`, all subsequent field operations (`RENAME FIELD`, `DROP FIELD`) against `m2` correctly resolve `m2` → internal `m1` to locate and modify the field mappings.
 
-# Step 2: Rename field
-docker exec influxdb-modified influx -database fresh_db -execute \
-  "ALTER MEASUREMENT test RENAME FIELD temperature TO Air_Temperature"
+---
 
-# Step 3: Insert new field with old name
-docker exec influxdb-modified influx -database fresh_db -execute \
-  "INSERT test temperature=200,other=300"
+### Scenario 8: Dropping a Renamed Measurement Clears Field Mappings
+*Tested in: `test_13_drop_renamed_measurement_clears_fields`*
 
-# Step 4: Delete renamed field
-docker exec influxdb-modified influx -database fresh_db -execute \
-  "DROP FIELD Air_Temperature FROM test"
+After `ALTER MEASUREMENT m1 RENAME TO m2`, a `DROP MEASUREMENT m2` resolves `m2` → internal `m1` and completely deletes all field mappings for `m1` from cache and disk, ensuring a clean slate if `m1` is recreated.
 
-# Verify:
-docker exec influxdb-modified influx -database fresh_db -execute \
-  "SHOW FIELD MAPPINGS FROM test"
+---
 
-# Should show active mappings only (e.g. temperature -> Air_Temperature; temperature.v2 -> temperature). No state column.
-```
+### Scenario 9: Renamed Names Stay Masked
+*Tested in: `test_14_garbage_collection_protects_historical_names`*
 
-### Test 6: Backward Compatibility
+After `RENAME FIELD f_old TO f_new`, only the active pair `(f_new, internal_f_old)` is stored and persisted. A query for `f_old` returns no data; a query for `f_new` correctly resolves to the internal name.
+
+---
+
+### Scenario 10: Measurement Swap Preserves Independent Fields
+*Tested in: `test_15_measurement_swap_preserves_fields`*
+
+Swapping two measurement names via a temporary preserves each measurement's independent field dictionary. After the swap, querying `m1` returns fields that belonged to the original `m2` and vice versa — no field cross-pollution.
+
+---
+
+### Scenario 11: Recreating a Dropped Measurement Clears Field History
+*Tested in: `test_16_drop_recreate_measurement_clears_field_history`*
+
+After `DROP MEASUREMENT m_recreate`, all mapping history is wiped. Writing a new point creates a new internal measurement (`m_recreate.v2`) with a completely clean field mapping — no history from the old incarnation is inherited.
+
+---
+
+### Scenario 12: Multi-Layer Chained Renames (Database → Measurement → Field)
+*Tested in: `test_17_full_chain_db_meas_field_rename`*
+
+After renaming `db_old → db_new`, `m_old → m_new`, and `f_old → f_new` in sequence, a query `SELECT f_new FROM m_new` against `db_new` correctly resolves through all three mapping layers to the internal storage path `db_old / m_old / f_old`.
+
+---
+
+## Backward Compatibility Testing
 
 The mapping data is stored in `/var/lib/influxdb/data/<database>/field_mappings`. To test backward compatibility:
 
@@ -253,30 +204,18 @@ docker exec influxdb-stock influx -database testdb -execute \
 
 ## File Mapping Structure
 
-### Persistence Files
+Field mappings are stored as **JSON** files (not protobuf). The JSON format was chosen
+for debuggability — files can be inspected and manually repaired with any text editor.
 
-Field mappings are stored in:
-```
-/var/lib/influxdb/data/<database>/field_mappings
-```
+| Store | File path |
+|-------|-----------|
+| Database mappings | `<data-dir>/database_mappings.json` |
+| Measurement mappings | `<data-dir>/<db>/measurement_mappings.json` |
+| Field mappings | `<data-dir>/<db>/field_mappings.json` |
 
-Format: Protobuf `FieldMappingSet` message containing:
-- `Measurements[]` - One entry per measurement
-  - `Name` - Measurement name
-  - `Mappings[]` - Field mappings (only active mappings are persisted)
-    - `UserName` - User-facing name
-    - `InternalName` - Internal storage name (may have .v2, .v3 suffix for collision avoidance)
-
-### View Raw Mapping Data
-
-```bash
-# View raw protobuf data (strings will be visible)
-docker exec influxdb-modified cat /var/lib/influxdb/data/testdb/field_mappings | strings
-
-# Or copy and inspect
-docker cp influxdb-modified:/var/lib/influxdb/data/testdb/field_mappings /tmp/
-cat /tmp/field_mappings | strings
-```
+Each file has a rolling `.bak` backup (one generation). The save flow writes to `.tmp`,
+verifies the round-trip, rotates the current file to `.bak`, then renames `.tmp` to the
+primary. On load, if the primary is corrupt or missing, the `.bak` is tried automatically.
 
 ## Testing with Grafana
 
@@ -360,13 +299,7 @@ rm /tmp/influxd-linux-amd64
 
 ## Development Workflow
 
-1. Make changes to `influxql` library
-2. `cd other/influxql && go build ./...`
-3. Make changes to `influxdb`
-4. `cd other/influxdb && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o /tmp/influxd-linux-amd64 ./cmd/influxd`
-5. `docker cp /tmp/influxd-linux-amd64 influxdb-modified:/usr/bin/influxd`
-6. `docker restart influxdb-modified && sleep 10`
-7. Test with InfluxQL commands
+See **[README_DOCKER.md](README_DOCKER.md)** for the current end-to-end build and test workflow.
 
 ## Key Files Modified
 
@@ -379,11 +312,9 @@ rm /tmp/influxd-linux-amd64
 ### influxdb Application
 - `tsdb/field_mapping_store.go` - Centralized field mapping store (NEW)
 - `tsdb/store.go` - FieldMappingStore management
-- `tsdb/shard.go` displaced - Write/read path translation, SHOW FIELD KEYS filtering
+- `tsdb/shard.go` - Write/read path translation, SHOW FIELD KEYS filtering
 - `coordinator/statement_executor.go` - Drop/Rename execution, SHOW command, result translation
 - `tsdb/engine/tsm1/engine.go` - Query field name translation
-- `tsdb/internal/meta.proto` - Protobuf schema for field mappings
-- `tsdb/internal/meta.pb.go` - Generated protobuf code
 
 ## References
 
