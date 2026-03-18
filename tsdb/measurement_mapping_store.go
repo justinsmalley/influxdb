@@ -45,16 +45,6 @@ func (s *MeasurementMappingStore) RenameMeasurement(oldName, newName string) err
 	return s.Save()
 }
 
-func (s *MeasurementMappingStore) SoftDeleteMeasurement(userName string) error {
-	if err := ValidateMeasurementName(userName); err != nil {
-		return err
-	}
-	if err := s.SoftDeleteMapping("", userName); err != nil {
-		return err
-	}
-	return s.Save()
-}
-
 func (s *MeasurementMappingStore) CreateMeasurementMapping(userName string) (string, error) {
 	if err := ValidateMeasurementName(userName); err != nil {
 		return "", err
@@ -75,27 +65,7 @@ func (s *MeasurementMappingStore) CreateMeasurementMappingDeferred(userName stri
 	return s.CreateMappingDeferred("", userName)
 }
 
-// SaveIfDirty writes to disk only if in-memory state has changed since last save.
-// The dirty flag is cleared under the write lock before the save begins so that
-// any concurrent write that sets dirty=true after the clear will be caught by
-// the next SaveIfDirty call rather than being silently lost.
-func (s *MeasurementMappingStore) SaveIfDirty() error {
-	s.mu.Lock()
-	if !s.dirty {
-		s.mu.Unlock()
-		return nil
-	}
-	s.dirty = false
-	s.mu.Unlock()
-	if err := s.Save(); err != nil {
-		// Restore dirty so the next batch retries the flush.
-		s.mu.Lock()
-		s.dirty = true
-		s.mu.Unlock()
-		return err
-	}
-	return nil
-}
+func (s *MeasurementMappingStore) SaveIfDirty() error { return s.saveIfDirty(s.Save) }
 
 func (s *MeasurementMappingStore) GetUserMeasurementNames(internalNames []string) []string {
 	return s.GetUserNames("", internalNames)

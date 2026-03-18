@@ -207,11 +207,6 @@ func (s *GenericMappingStore) DropMappingsByInternalName(group, internalName str
 	return nil
 }
 
-// SoftDeleteMapping is essentially a drop since we don't track state
-func (s *GenericMappingStore) SoftDeleteMapping(group, userName string) error {
-	return s.DropMapping(group, userName)
-}
-
 func (s *GenericMappingStore) DropGroup(group string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -394,24 +389,24 @@ func (s *GenericMappingStore) CreateMappingDeferred(group, userName string) (str
 	return name, nil
 }
 
-// SaveIfDirty is a no-op at the GenericMappingStore level.
-// Typed stores override this to flush deferred changes to disk.
-func (s *GenericMappingStore) SaveIfDirty() error {
-	return nil
-}
-
-// IsDirty returns true if in-memory state has been modified since the last save.
-func (s *GenericMappingStore) IsDirty() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.dirty
-}
-
-// ClearDirty resets the dirty flag after a successful save.
-func (s *GenericMappingStore) ClearDirty() {
+// saveIfDirty is the shared implementation for SaveIfDirty across all typed stores.
+// It clears the dirty flag before saving so that any concurrent CreateMappingDeferred
+// that fires in the window is caught by the next call rather than silently lost.
+func (s *GenericMappingStore) saveIfDirty(saveFunc func() error) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if !s.dirty {
+		s.mu.Unlock()
+		return nil
+	}
 	s.dirty = false
+	s.mu.Unlock()
+	if err := saveFunc(); err != nil {
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // loadFromDisk handles the shared load-with-backup-fallback pattern.

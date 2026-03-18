@@ -414,11 +414,6 @@ func (e *StatementExecutor) executeDropMeasurementStatement(stmt *influxql.DropM
 		return query.ErrDatabaseNotFound(database)
 	}
 
-	internalDatabase, err := e.translateDatabaseName(database)
-	if err == nil && internalDatabase != "" {
-		database = internalDatabase
-	}
-
 	// Locally drop the measurement
 	return e.TSDBStore.DeleteMeasurement(database, stmt.Name)
 }
@@ -426,11 +421,6 @@ func (e *StatementExecutor) executeDropMeasurementStatement(stmt *influxql.DropM
 func (e *StatementExecutor) executeDropSeriesStatement(stmt *influxql.DropSeriesStatement, database string) error {
 	if dbi := e.MetaClient.Database(database); dbi == nil {
 		return query.ErrDatabaseNotFound(database)
-	}
-
-	internalDatabase, err := e.translateDatabaseName(database)
-	if err == nil && internalDatabase != "" {
-		database = internalDatabase
 	}
 
 	// Check for time in WHERE clause (not supported).
@@ -510,22 +500,6 @@ func (e *StatementExecutor) RenameDatabase(oldName, newName string) error {
 		// Mock implementation or tests might not provide *tsdb.Store
 		return nil
 	}
-
-	// Check if new database name implicitly exists
-	mappingStore, err := store.DatabaseMappingStore()
-	if err != nil {
-		return fmt.Errorf("failed to access database mapping store: %w", err)
-	}
-	internalNewName, isActive := mappingStore.GetInternalDatabaseName(newName)
-	if isActive && internalNewName == newName {
-		// If it's active and hasn't been remapped, it means it's an implicit mapping.
-		// Check if there's actual data in the meta store for this database.
-		if e.MetaClient != nil && e.MetaClient.Database(newName) != nil {
-			return fmt.Errorf("database %s already exists", newName)
-		}
-	}
-	// The mapping store's RenameMapping will handle checking for inactive/explicit mappings.
-
 	return store.RenameDatabaseMapping(oldName, newName)
 }
 

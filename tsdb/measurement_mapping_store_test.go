@@ -52,7 +52,10 @@ func TestMeasurementMappingStore_RenameDropRecreate(t *testing.T) {
 	}
 
 	// 3. Drop m1_new
-	if err := store.SoftDeleteMeasurement("m1_new"); err != nil {
+	if err := store.DropMapping("", "m1_new"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
 

@@ -54,14 +54,6 @@ func (s *DatabaseMappingStore) DropDatabaseMappingByInternal(internalName string
 	return s.Save()
 }
 
-func (s *DatabaseMappingStore) SoftDeleteDatabase(userName string) error {
-	err := s.SoftDeleteMapping("", userName)
-	if err != nil {
-		return err
-	}
-	return s.Save()
-}
-
 func (s *DatabaseMappingStore) CreateDatabaseMapping(userName string) (string, error) {
 	name, err := s.CreateMapping("", userName)
 	if err != nil {
@@ -76,26 +68,7 @@ func (s *DatabaseMappingStore) CreateDatabaseMappingDeferred(userName string) (s
 	return s.CreateMappingDeferred("", userName)
 }
 
-// SaveIfDirty writes to disk only if in-memory state has changed since last save.
-// The dirty flag is cleared under the write lock before the save begins so that
-// any concurrent write that sets dirty=true after the clear will be caught by
-// the next SaveIfDirty call rather than being silently lost.
-func (s *DatabaseMappingStore) SaveIfDirty() error {
-	s.mu.Lock()
-	if !s.dirty {
-		s.mu.Unlock()
-		return nil
-	}
-	s.dirty = false
-	s.mu.Unlock()
-	if err := s.Save(); err != nil {
-		s.mu.Lock()
-		s.dirty = true
-		s.mu.Unlock()
-		return err
-	}
-	return nil
-}
+func (s *DatabaseMappingStore) SaveIfDirty() error { return s.saveIfDirty(s.Save) }
 
 func (s *DatabaseMappingStore) GetUserDatabaseNames(internalNames []string) []string {
 	return s.GetUserNames("", internalNames)

@@ -57,8 +57,7 @@ func (s *FieldMappingStore) SoftDeleteField(measurement, userName string) error 
 	if err := ValidateFieldName(userName); err != nil {
 		return err
 	}
-	err := s.SoftDeleteMapping(measurement, userName)
-	if err != nil {
+	if err := s.DropMapping(measurement, userName); err != nil {
 		return err
 	}
 	return s.Save()
@@ -84,27 +83,7 @@ func (s *FieldMappingStore) CreateFieldMappingDeferred(measurement, userName str
 	return s.CreateMappingDeferred(measurement, userName)
 }
 
-// SaveIfDirty writes to disk only if in-memory state has changed since last save.
-// The dirty flag is cleared under the write lock before the save begins so that
-// any concurrent write that sets dirty=true after the clear will be caught by
-// the next SaveIfDirty call rather than being silently lost.
-func (s *FieldMappingStore) SaveIfDirty() error {
-	s.mu.Lock()
-	if !s.dirty {
-		s.mu.Unlock()
-		return nil
-	}
-	s.dirty = false
-	s.mu.Unlock()
-	if err := s.Save(); err != nil {
-		// Restore dirty so the next batch retries the flush.
-		s.mu.Lock()
-		s.dirty = true
-		s.mu.Unlock()
-		return err
-	}
-	return nil
-}
+func (s *FieldMappingStore) SaveIfDirty() error { return s.saveIfDirty(s.Save) }
 
 func (s *FieldMappingStore) GetUserFieldNames(measurement string, internalFieldNames []string) []string {
 	return s.GetUserNames(measurement, internalFieldNames)
