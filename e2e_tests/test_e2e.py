@@ -1264,6 +1264,136 @@ class TestInfluxDBE2E(unittest.TestCase):
         self.assertEqual(len(series_after), 1, "New measurement after restart should work")
 
 
+    def test_21_drop_recreate_field_gets_version_suffix(self):
+        """
+        Regression test for Bug #1: dropped field internal slot must NOT be
+        reused when the same user name is written again.
+
+        Before the fix, createMappingLocked treated ByInternal[k]=="" as a
+        free slot and recycled it, making pre-drop TSM data visible again under
+        the recreated name.
+
+        Expected (per README_FIELD_MAPPINGS.md Scenario 2):
+          - DROP FIELD temp        -> ByInternal["temp"] = "" (tombstone)
+          - Write temp again       -> new internal name is "temp.v2"
+          - SHOW FIELD MAPPINGS   -> temp -> temp.v2
+          - Query temp             -> returns only post-recreate data (1 point)
+        """
+        print("\n--- Running test_21_drop_recreate_field_gets_version_suffix ---")
+        DB = "e2e_db_drop_recreate_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # Write original data to field "temp".
+        write_points(["sensors,tag=1 temp=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        # Drop the field — marks the internal slot as a tombstone.
+        query("DROP FIELD temp FROM sensors", db=DB, method="POST")
+        time.sleep(0.5)
+
+        # Verify the field is gone.
+        res_gone = query("SELECT temp FROM sensors", db=DB)
+        series_gone = res_gone.get("results", [{}])[0].get("series", [])
+        self.assertEqual(
+            len(series_gone), 0,
+            f"Dropped field should not be visible: {res_gone}",
+        )
+
+        # Write new data under the same user name "temp".
+        write_points(["sensors,tag=1 temp=99.0 2000000000"], db=DB)
+        time.sleep(0.5)
+
+        # The mapping for "temp" must point to a NEW internal name (temp.v2),
+        # not the old tombstoned slot, so that TSM data for the original "temp"
+        # internal key stays hidden.
+        mappings = query("SHOW FIELD MAPPINGS FROM sensors", db=DB)
+        field_series = mappings.get("results", [{}])[0].get("series", [])
+        self.assertTrue(len(field_series) > 0, "Expected field mappings for sensors")
+
+        temp_internal = None
+        for row in field_series[0]["values"]:
+            # Columns: measurement, user_name, internal_name
+            if row[1] == "temp":
+                temp_internal = row[2]
+                break
+
+        self.assertIsNotNone(temp_internal, "Mapping for 'temp' not found in SHOW FIELD MAPPINGS")
+        self.assertEqual(
+            temp_internal, "temp.v2",
+            f"Recreated field 'temp' must use internal name 'temp.v2' to avoid "
+            f"exposing pre-drop data, but got '{temp_internal}'",
+        )
+
+        # Query must return only the post-recreate point (99.0), not the old
+        # pre-drop value (1.0). If the tombstone were reused, both would appear.
+        res_new = query("SELECT temp FROM sensors", db=DB)
+        series_new = res_new.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series_new), 1, f"Expected 1 series for recreated temp: {res_new}")
+        values = series_new[0]["values"]
+        self.assertEqual(len(values), 1, f"Expected exactly 1 point (post-recreate only): {values}")
+        self.assertAlmostEqual(
+            values[0][1], 99.0, places=6,
+            msg=f"Expected post-recreate value 99.0, got {values[0][1]}",
+        )
+
+    def test_22_moving_window_size_overflow_rejected(self):
+        """
+        Regression test for Issue #11: moving_average and moving_median must
+        reject window sizes above 10000 to prevent int64 overflow when the
+        size is multiplied by a query interval in nanoseconds.
+        """
+        print("\n--- Running test_22_moving_window_size_overflow_rejected ---")
+        DB = "e2e_db_moving_overflow"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["sensors val=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        def _assert_error_response(res, fn_name):
+            """Assert that a query result carries an error, not data."""
+            result0 = res.get("results", [{}])[0]
+            has_error = "error" in result0
+            has_series = "series" in result0 and len(result0["series"]) > 0
+            self.assertTrue(
+                has_error or not has_series,
+                f"{fn_name}(val, 10001) should return an error or no data, got: {res}",
+            )
+            if has_error:
+                self.assertIn(
+                    "10001", result0["error"],
+                    f"Error message should mention the rejected window size: {result0['error']}",
+                )
+
+        # moving_average with windowSize > 10000 should be rejected.
+        try:
+            res_avg = query(
+                "SELECT moving_average(val, 10001) FROM sensors",
+                db=DB,
+            )
+            _assert_error_response(res_avg, "moving_average")
+        except Exception as e:
+            # An HTTP-level error is also acceptable — the request was rejected.
+            self.assertIn(
+                "10001", str(e),
+                f"HTTP error should mention the rejected window size: {e}",
+            )
+
+        # moving_median with windowSize > 10000 should be rejected.
+        try:
+            res_med = query(
+                "SELECT moving_median(val, 10001) FROM sensors",
+                db=DB,
+            )
+            _assert_error_response(res_med, "moving_median")
+        except Exception as e:
+            self.assertIn(
+                "10001", str(e),
+                f"HTTP error should mention the rejected window size: {e}",
+            )
+
+
 class TestMovingFunctionsAfterRename(unittest.TestCase):
     """moving_average and moving_median work correctly on renamed fields."""
 

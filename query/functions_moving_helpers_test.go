@@ -324,7 +324,10 @@ func TestParseMovingWindowArgs_EvenN_AsymmetricPadding(t *testing.T) {
 		Ascending: true,
 	}
 
-	n, minPeriods, center := parseMovingWindowArgs(call, &opt)
+	n, minPeriods, center, err := parseMovingWindowArgs(call, &opt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if n != 4 {
 		t.Errorf("n: expected 4, got %d", n)
 	}
@@ -376,7 +379,9 @@ func TestParseMovingWindowArgs_OddN_SymmetricPadding(t *testing.T) {
 		Ascending: true,
 	}
 
-	parseMovingWindowArgs(call, &opt)
+	if _, _, _, err := parseMovingWindowArgs(call, &opt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// startPad = (3-1)/2 = 1; endPad = 3/2 = 1 — equal for odd N
 	wantStart := origStart - 1*intervalNS

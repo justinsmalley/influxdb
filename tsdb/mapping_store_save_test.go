@@ -118,9 +118,11 @@ func TestMarshalAndSave_MeasurementStore(t *testing.T) {
 	}
 }
 
-// TestMarshalAndSave_DropRecreateReusesSlot verifies that dropping and
-// recreating a field reuses the freed internal name slot.
-func TestMarshalAndSave_DropRecreateReusesSlot(t *testing.T) {
+// TestMarshalAndSave_DropRecreateUsesVersionSuffix verifies that dropping and
+// recreating a field gives the recreated name a .v2 internal name so that old
+// TSM data for the original "temp" internal slot stays hidden (Scenario 2 in
+// README_FIELD_MAPPINGS.md). The dropped slot must NOT be reused.
+func TestMarshalAndSave_DropRecreateUsesVersionSuffix(t *testing.T) {
 	dir, err := os.MkdirTemp("", "marshalsave_reuse_test")
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +135,8 @@ func TestMarshalAndSave_DropRecreateReusesSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create, drop, recreate — dropped slot (v=="") is reusable
+	// Create, drop, recreate — tombstone slot must NOT be reused; new internal
+	// name should be temp.v2 so that pre-drop TSM data remains invisible.
 	if _, err := store.CreateFieldMapping("meas1", "temp"); err != nil {
 		t.Fatal(err)
 	}
@@ -144,19 +147,19 @@ func TestMarshalAndSave_DropRecreateReusesSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if internalName != "temp" {
-		t.Fatalf("expected reused slot 'temp', got %s", internalName)
+	if internalName != "temp.v2" {
+		t.Fatalf("expected new slot 'temp.v2' after drop+recreate, got %s", internalName)
 	}
 
-	// Reload and verify
+	// Reload and verify the mapping survives a round-trip.
 	store2, err := tsdb.NewFieldMappingStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	internal, found := store2.GetInternalFieldName("meas1", "temp")
-	if !found || internal != "temp" {
-		t.Fatalf("after reload: expected temp -> temp, got %s (found=%v)", internal, found)
+	if !found || internal != "temp.v2" {
+		t.Fatalf("after reload: expected temp -> temp.v2, got %s (found=%v)", internal, found)
 	}
 }
 

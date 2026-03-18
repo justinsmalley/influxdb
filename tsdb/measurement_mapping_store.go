@@ -76,15 +76,24 @@ func (s *MeasurementMappingStore) CreateMeasurementMappingDeferred(userName stri
 }
 
 // SaveIfDirty writes to disk only if in-memory state has changed since last save.
+// The dirty flag is cleared under the write lock before the save begins so that
+// any concurrent write that sets dirty=true after the clear will be caught by
+// the next SaveIfDirty call rather than being silently lost.
 func (s *MeasurementMappingStore) SaveIfDirty() error {
-	if !s.IsDirty() {
+	s.mu.Lock()
+	if !s.dirty {
+		s.mu.Unlock()
 		return nil
 	}
+	s.dirty = false
+	s.mu.Unlock()
 	if err := s.Save(); err != nil {
-		// Leave dirty=true so the next batch retries the flush.
+		// Restore dirty so the next batch retries the flush.
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
 		return err
 	}
-	s.ClearDirty()
 	return nil
 }
 

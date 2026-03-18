@@ -40,9 +40,8 @@ func computeMedian(sorted []float64) float64 {
 	return sorted[n/2]
 }
 
-// Float helpers
-
-func calculateMovingAverageFloat(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []float64) ([]float64, int64) {
+// movingAverageCore computes the moving average over a pre-converted []float64 buffer.
+func movingAverageCore(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, vals []float64) ([]float64, int64) {
 	if rTime == 0 {
 		return []float64{}, 0
 	}
@@ -54,14 +53,15 @@ func calculateMovingAverageFloat(rTime int64, windowSize, minPeriods int, interv
 	if validCount >= minPeriods {
 		sum := 0.0
 		for _, i := range indices {
-			sum += valueBuf[i]
+			sum += vals[i]
 		}
 		return []float64{sum / float64(validCount)}, int64(validCount)
 	}
 	return []float64{}, int64(validCount)
 }
 
-func calculateMovingMedianFloat(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []float64) ([]float64, int64) {
+// movingMedianCore computes the moving median over a pre-converted []float64 buffer.
+func movingMedianCore(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, vals []float64) ([]float64, int64) {
 	if rTime == 0 {
 		return []float64{}, 0
 	}
@@ -70,86 +70,56 @@ func calculateMovingMedianFloat(rTime int64, windowSize, minPeriods int, interva
 	if validCount < minPeriods {
 		return []float64{}, int64(validCount)
 	}
-	vals := make([]float64, validCount)
+	window := make([]float64, validCount)
 	for j, i := range indices {
-		vals[j] = valueBuf[i]
+		window[j] = vals[i]
 	}
-	sort.Float64s(vals)
-	return []float64{computeMedian(vals)}, int64(validCount)
+	sort.Float64s(window)
+	return []float64{computeMedian(window)}, int64(validCount)
+}
+
+// Float helpers
+
+func calculateMovingAverageFloat(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []float64) ([]float64, int64) {
+	return movingAverageCore(rTime, windowSize, minPeriods, interval, timeBuf, valueBuf)
+}
+
+func calculateMovingMedianFloat(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []float64) ([]float64, int64) {
+	return movingMedianCore(rTime, windowSize, minPeriods, interval, timeBuf, valueBuf)
 }
 
 // Int helpers
 
 func calculateMovingAverageInt(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []int64) ([]float64, int64) {
-	if rTime == 0 {
-		return []float64{}, 0
+	vals := make([]float64, len(valueBuf))
+	for i, v := range valueBuf {
+		vals[i] = float64(v)
 	}
-	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
-	validCount := len(indices)
-	if validCount == 0 {
-		return []float64{}, 0
-	}
-	if validCount >= minPeriods {
-		sum := 0.0
-		for _, i := range indices {
-			sum += float64(valueBuf[i])
-		}
-		return []float64{sum / float64(validCount)}, int64(validCount)
-	}
-	return []float64{}, int64(validCount)
+	return movingAverageCore(rTime, windowSize, minPeriods, interval, timeBuf, vals)
 }
 
 func calculateMovingMedianInt(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []int64) ([]float64, int64) {
-	if rTime == 0 {
-		return []float64{}, 0
+	vals := make([]float64, len(valueBuf))
+	for i, v := range valueBuf {
+		vals[i] = float64(v)
 	}
-	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
-	validCount := len(indices)
-	if validCount < minPeriods {
-		return []float64{}, int64(validCount)
-	}
-	vals := make([]float64, validCount)
-	for j, i := range indices {
-		vals[j] = float64(valueBuf[i])
-	}
-	sort.Float64s(vals)
-	return []float64{computeMedian(vals)}, int64(validCount)
+	return movingMedianCore(rTime, windowSize, minPeriods, interval, timeBuf, vals)
 }
 
 // Uint helpers
 
 func calculateMovingAverageUint(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []uint64) ([]float64, int64) {
-	if rTime == 0 {
-		return []float64{}, 0
+	vals := make([]float64, len(valueBuf))
+	for i, v := range valueBuf {
+		vals[i] = float64(v)
 	}
-	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
-	validCount := len(indices)
-	if validCount == 0 {
-		return []float64{}, 0
-	}
-	if validCount >= minPeriods {
-		sum := 0.0
-		for _, i := range indices {
-			sum += float64(valueBuf[i])
-		}
-		return []float64{sum / float64(validCount)}, int64(validCount)
-	}
-	return []float64{}, int64(validCount)
+	return movingAverageCore(rTime, windowSize, minPeriods, interval, timeBuf, vals)
 }
 
 func calculateMovingMedianUint(rTime int64, windowSize, minPeriods int, interval time.Duration, timeBuf []int64, valueBuf []uint64) ([]float64, int64) {
-	if rTime == 0 {
-		return []float64{}, 0
+	vals := make([]float64, len(valueBuf))
+	for i, v := range valueBuf {
+		vals[i] = float64(v)
 	}
-	indices := filterValidIndices(rTime, windowSize, interval, timeBuf)
-	validCount := len(indices)
-	if validCount < minPeriods {
-		return []float64{}, int64(validCount)
-	}
-	vals := make([]float64, validCount)
-	for j, i := range indices {
-		vals[j] = float64(valueBuf[i])
-	}
-	sort.Float64s(vals)
-	return []float64{computeMedian(vals)}, int64(validCount)
+	return movingMedianCore(rTime, windowSize, minPeriods, interval, timeBuf, vals)
 }

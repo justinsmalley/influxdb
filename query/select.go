@@ -280,10 +280,16 @@ func (b *exprIteratorBuilder) buildCallIterator(ctx context.Context, expr *influ
 			isNonNegative := (expr.Name == "non_negative_difference")
 			return newDifferenceIterator(input, opt, isNonNegative)
 		case "moving_average":
-			n, minPeriods, center := parseMovingWindowArgs(expr, &opt)
+			n, minPeriods, center, err := parseMovingWindowArgs(expr, &opt)
+			if err != nil {
+				return nil, err
+			}
 			return newMovingAverageIterator(input, n, minPeriods, center, opt)
 		case "moving_median":
-			n, minPeriods, center := parseMovingWindowArgs(expr, &opt)
+			n, minPeriods, center, err := parseMovingWindowArgs(expr, &opt)
+			if err != nil {
+				return nil, err
+			}
 			return newMovingMedianIterator(input, n, minPeriods, center, opt)
 		case "exponential_moving_average", "double_exponential_moving_average", "triple_exponential_moving_average", "relative_strength_index", "triple_exponential_derivative":
 			n := expr.Args[1].(*influxql.IntegerLiteral)
@@ -568,12 +574,21 @@ func (b *exprIteratorBuilder) buildCallIterator(ctx context.Context, expr *influ
 	return itr, nil
 }
 
+// maxMovingWindowSize is the largest window size accepted by moving_average and
+// moving_median. Values above this bound risk int64 overflow when the window
+// size is multiplied by the query interval in nanoseconds.
+const maxMovingWindowSize = 10000
+
 // parseMovingWindowArgs parses the windowSize, minPeriods, and center flag
 // from a moving_average or moving_median call expression, then applies the
 // appropriate time range padding to opt. The call is expected to have already
 // passed compile-time validation.
-func parseMovingWindowArgs(call *influxql.Call, opt *IteratorOptions) (n, minPeriods int, center bool) {
+func parseMovingWindowArgs(call *influxql.Call, opt *IteratorOptions) (n, minPeriods int, center bool, err error) {
 	nLit := call.Args[1].(*influxql.IntegerLiteral)
+	if nLit.Val > maxMovingWindowSize {
+		err = fmt.Errorf("moving window size %d exceeds maximum allowed value of %d", nLit.Val, maxMovingWindowSize)
+		return
+	}
 	n = int(nLit.Val)
 	minPeriods = n
 
@@ -606,7 +621,7 @@ func parseMovingWindowArgs(call *influxql.Call, opt *IteratorOptions) (n, minPer
 			}
 		}
 	}
-	return n, minPeriods, center
+	return n, minPeriods, center, nil
 }
 
 func (b *exprIteratorBuilder) callIterator(ctx context.Context, expr *influxql.Call, opt IteratorOptions) (Iterator, error) {

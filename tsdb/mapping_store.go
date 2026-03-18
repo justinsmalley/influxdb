@@ -79,8 +79,10 @@ func (s *GenericMappingStore) createMappingLocked(group, userName string) (strin
 		} else {
 			internalName = fmt.Sprintf("%s.v%d", userName, next)
 		}
-		// Use slot if not present or if it was dropped (value "" means we can reuse)
-		if v, exists := groupMappings.ByInternal[internalName]; !exists || v == "" {
+		// Only use a slot that is entirely absent — never reuse a tombstone
+		// (ByInternal[k] == "") because old TSM data for that key is still on
+		// disk and would become visible again if we recycled the slot.
+		if _, exists := groupMappings.ByInternal[internalName]; !exists {
 			break
 		}
 	}
@@ -225,11 +227,11 @@ func (s *GenericMappingStore) DropDatabase(database string) error {
 }
 
 func (s *GenericMappingStore) Load() error {
-	panic("GenericMappingStore.Load must not be called directly; use the typed store's load()")
+	return fmt.Errorf("GenericMappingStore.Load must not be called directly; use the typed store's Load()")
 }
 
 func (s *GenericMappingStore) Save() error {
-	panic("GenericMappingStore.Save must not be called directly; use the typed store's Save()")
+	return fmt.Errorf("GenericMappingStore.Save must not be called directly; use the typed store's Save()")
 }
 
 // GetAllMappings returns a list of all ACTIVE mappings
@@ -477,6 +479,20 @@ func (s *GenericMappingStore) GetAllGroups() []string {
 	return s.getAllGroupsLocked()
 }
 
+// GetAllMappingsAllGroups returns a consistent snapshot of all active mappings
+// across every group. It holds the read lock for the entire traversal so no
+// group can be added or removed mid-iteration.
+func (s *GenericMappingStore) GetAllMappingsAllGroups() map[string][]*MappingEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	groups := s.getAllGroupsLocked()
+	result := make(map[string][]*MappingEntry, len(groups))
+	for _, g := range groups {
+		result[g] = s.getAllMappingsLocked(g)
+	}
+	return result
+}
+
 // getAllGroupsLocked returns all groups. Caller must hold at least s.mu.RLock().
 func (s *GenericMappingStore) getAllGroupsLocked() []string {
 	var groups []string
@@ -484,6 +500,22 @@ func (s *GenericMappingStore) getAllGroupsLocked() []string {
 		groups = append(groups, group)
 	}
 	return groups
+}
+
+// compactLocked removes tombstone entries (ByInternal[k] == "") from a group's
+// in-memory map. It must only be called when the caller can guarantee that no
+// TSM data exists for the tombstoned internal names — for example, immediately
+// after a hard DROP that also deleted on-disk data. Caller must hold s.mu.Lock().
+func (s *GenericMappingStore) compactLocked(group string) {
+	gm, exists := s.mappings[group]
+	if !exists {
+		return
+	}
+	for k, v := range gm.ByInternal {
+		if v == "" {
+			delete(gm.ByInternal, k)
+		}
+	}
 }
 
 // Helper methods for direct assignment, used mainly by tests or initialization

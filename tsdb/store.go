@@ -248,7 +248,7 @@ func (s *Store) Open() error {
 	if !s.EngineOptions.MonitorDisabled {
 		s.wg.Add(1)
 		go func() {
-			s.wg.Done()
+			defer s.wg.Done()
 			s.monitorShards()
 		}()
 	}

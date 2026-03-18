@@ -1088,7 +1088,7 @@ func (s *Shard) FieldDimensions(measurements []string) (fields map[string]influx
 				// Determine user-facing name
 				userFacingName := internalField
 				if fieldMappingStore != nil {
-					userNames := fieldMappingStore.GetUserFieldNames(name, []string{internalField})
+					userNames := fieldMappingStore.GetUserFieldNames(internalName, []string{internalField})
 					if len(userNames) > 0 {
 						if userNames[0] == "" {
 							continue // Explicitly deleted or renamed away

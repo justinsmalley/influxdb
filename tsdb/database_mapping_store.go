@@ -5,8 +5,6 @@ import (
 	"sort"
 )
 
-type DatabaseMapping = MappingEntry
-
 type DatabaseMappingInfo struct {
 	UserName     string
 	InternalName string
@@ -70,6 +68,33 @@ func (s *DatabaseMappingStore) CreateDatabaseMapping(userName string) (string, e
 		return "", err
 	}
 	return name, s.Save()
+}
+
+// CreateDatabaseMappingDeferred creates the in-memory mapping without an
+// immediate disk write. Call SaveIfDirty after the batch completes to flush.
+func (s *DatabaseMappingStore) CreateDatabaseMappingDeferred(userName string) (string, error) {
+	return s.CreateMappingDeferred("", userName)
+}
+
+// SaveIfDirty writes to disk only if in-memory state has changed since last save.
+// The dirty flag is cleared under the write lock before the save begins so that
+// any concurrent write that sets dirty=true after the clear will be caught by
+// the next SaveIfDirty call rather than being silently lost.
+func (s *DatabaseMappingStore) SaveIfDirty() error {
+	s.mu.Lock()
+	if !s.dirty {
+		s.mu.Unlock()
+		return nil
+	}
+	s.dirty = false
+	s.mu.Unlock()
+	if err := s.Save(); err != nil {
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (s *DatabaseMappingStore) GetUserDatabaseNames(internalNames []string) []string {
