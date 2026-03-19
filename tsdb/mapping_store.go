@@ -513,6 +513,15 @@ func (s *GenericMappingStore) compactLocked(group string) {
 	}
 }
 
+// Compact removes tombstone entries for a group, acquiring the write lock.
+// Call this only after on-disk data for the tombstoned internal names has been
+// deleted; it is a no-op if the group does not exist.
+func (s *GenericMappingStore) Compact(group string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.compactLocked(group)
+}
+
 // Helper methods for direct assignment, used mainly by tests or initialization
 func (s *GenericMappingStore) SetMappings(group string, mappings []*MappingEntry) {
 	s.mu.Lock()

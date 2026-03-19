@@ -1025,10 +1025,17 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 	if internal, isActive := measMappingStore.GetInternalMeasurementName(name); isActive {
 		internalName = internal
 	}
-	// Save field mappings first, then measurement mappings. This order ensures
-	// that a crash between the two saves leaves an orphaned measurement entry
-	// (not orphaned field entries), which reconcileMappings can safely clean up
-	// on restart. The reverse order would leave unreachable field mappings.
+	// Save measurement mapping first, then field mappings. If a crash occurs
+	// between the two writes, the measurement is already gone from
+	// measurement_mappings.json, so reconcileMappings will not attempt to
+	// recreate field mappings for it on restart. The reverse order would leave
+	// the measurement active but with no field mappings, causing reconcileMappings
+	// to recreate identity field mappings and overwrite any field renames.
+	measMappingStore.DropMappingsByInternalName("", internalName)
+	if err := measMappingStore.Save(); err != nil {
+		return fmt.Errorf("save measurement mapping after drop: %w", err)
+	}
+
 	fieldMappingStore, err := s.FieldMappingStore(database)
 	if err != nil {
 		return err
@@ -1036,13 +1043,6 @@ func (s *Store) DeleteMeasurement(database, name string) error {
 	fieldMappingStore.DropGroup(internalName)
 	if err := fieldMappingStore.Save(); err != nil {
 		return fmt.Errorf("save field mapping after drop: %w", err)
-	}
-
-	// Completely remove it from the mapping store instead of soft deleting.
-	// This guarantees the name is fully released for recreation.
-	measMappingStore.DropMappingsByInternalName("", internalName)
-	if err := measMappingStore.Save(); err != nil {
-		return fmt.Errorf("save measurement mapping after drop: %w", err)
 	}
 
 	// Limit to 1 delete for each shard since expanding the measurement into the list
