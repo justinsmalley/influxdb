@@ -2221,9 +2221,8 @@ func dirExists(path string) bool {
 	return !os.IsNotExist(err)
 }
 
-// Test-1: DeleteDatabase must always release fieldMappingMu and
-// measurementMappingMu, and must always remove the in-memory cache entry
-// regardless of file-remove errors.
+// Test-1: DeleteDatabase must always release perDBStoresMu and must always
+// remove the in-memory cache entry regardless of file-remove errors.
 func TestStore_DeleteDatabase_MappingStoreCleanup(t *testing.T) {
 	t.Parallel()
 

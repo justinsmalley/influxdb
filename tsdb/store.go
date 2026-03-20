@@ -72,6 +72,14 @@ func (d *databaseState) removeIndexType(indexType string) {
 // hasMultipleIndexTypes returns true if the database has multiple index types.
 func (d *databaseState) hasMultipleIndexTypes() bool { return d != nil && len(d.indexTypes) > 1 }
 
+// perDatabaseStores groups all per-database mapping stores.
+// Lazily initialized on first access; protected by Store.perDBStoresMu.
+type perDatabaseStores struct {
+	field       *FieldMappingStore
+	tagKey      *TagKeyMappingStore
+	measurement *MeasurementMappingStore
+}
+
 // Store manages shards and indexes for databases.
 type Store struct {
 	mu                sync.RWMutex
@@ -101,16 +109,9 @@ type Store struct {
 	wg      sync.WaitGroup
 	opened  bool
 
-	// Field mapping stores per database
-	fieldMappingStores map[string]*FieldMappingStore
-	fieldMappingMu     sync.RWMutex
-
-	// Tag key mapping stores per database
-	tagKeyMappingStores map[string]*TagKeyMappingStore
-	tagKeyMappingMu     sync.RWMutex
-
-	measurementMappingStores map[string]*MeasurementMappingStore
-	measurementMappingMu     sync.RWMutex
+	// Per-database mapping stores (field, tag key, measurement), lazily initialized.
+	perDBStores   map[string]*perDatabaseStores
+	perDBStoresMu sync.RWMutex
 
 	databaseMappingStore *DatabaseMappingStore
 	databaseMappingMu    sync.RWMutex
@@ -130,9 +131,7 @@ func NewStore(path string) *Store {
 		EngineOptions:            NewEngineOptions(),
 		Logger:                   logger,
 		baseLogger:               logger,
-		fieldMappingStores:       make(map[string]*FieldMappingStore),
-		tagKeyMappingStores:      make(map[string]*TagKeyMappingStore),
-		measurementMappingStores: make(map[string]*MeasurementMappingStore),
+		perDBStores: make(map[string]*perDatabaseStores),
 	}
 }
 
@@ -573,62 +572,57 @@ func (s *Store) createIndexIfNotExists(name string) (interface{}, error) {
 	return idx, nil
 }
 
-// FieldMappingStore returns the field mapping store for a database
-func (s *Store) FieldMappingStore(database string) (*FieldMappingStore, error) {
-	s.fieldMappingMu.RLock()
-	store, exists := s.fieldMappingStores[database]
-	s.fieldMappingMu.RUnlock()
-
+// getOrCreatePerDBStores returns the perDatabaseStores for the given database,
+// creating and initializing all three mapping stores if they don't exist yet.
+func (s *Store) getOrCreatePerDBStores(database string) (*perDatabaseStores, error) {
+	s.perDBStoresMu.RLock()
+	stores, exists := s.perDBStores[database]
+	s.perDBStoresMu.RUnlock()
 	if exists {
-		return store, nil
+		return stores, nil
 	}
 
-	// Create new store
-	s.fieldMappingMu.Lock()
-	defer s.fieldMappingMu.Unlock()
-
-	// Double-check after acquiring write lock
-	if store, exists := s.fieldMappingStores[database]; exists {
-		return store, nil
+	s.perDBStoresMu.Lock()
+	defer s.perDBStoresMu.Unlock()
+	if stores, exists = s.perDBStores[database]; exists {
+		return stores, nil
 	}
 
-	path := filepath.Join(s.path, database, "field_mappings.json")
-	store, err := NewFieldMappingStore(path)
+	dbPath := filepath.Join(s.path, database)
+	fieldStore, err := NewFieldMappingStore(filepath.Join(dbPath, "field_mappings.json"))
+	if err != nil {
+		return nil, err
+	}
+	tagStore, err := NewTagKeyMappingStore(filepath.Join(dbPath, "tag_key_mappings.json"))
+	if err != nil {
+		return nil, err
+	}
+	measStore, err := NewMeasurementMappingStore(filepath.Join(dbPath, "measurement_mappings.json"))
 	if err != nil {
 		return nil, err
 	}
 
-	s.fieldMappingStores[database] = store
-	return store, nil
+	stores = &perDatabaseStores{field: fieldStore, tagKey: tagStore, measurement: measStore}
+	s.perDBStores[database] = stores
+	return stores, nil
+}
+
+// FieldMappingStore returns the field mapping store for a database.
+func (s *Store) FieldMappingStore(database string) (*FieldMappingStore, error) {
+	stores, err := s.getOrCreatePerDBStores(database)
+	if err != nil {
+		return nil, err
+	}
+	return stores.field, nil
 }
 
 // TagKeyMappingStore returns the tag key mapping store for a database.
 func (s *Store) TagKeyMappingStore(database string) (*TagKeyMappingStore, error) {
-	s.tagKeyMappingMu.RLock()
-	store, exists := s.tagKeyMappingStores[database]
-	s.tagKeyMappingMu.RUnlock()
-
-	if exists {
-		return store, nil
-	}
-
-	// Create new store.
-	s.tagKeyMappingMu.Lock()
-	defer s.tagKeyMappingMu.Unlock()
-
-	// Double-check after acquiring write lock.
-	if store, exists := s.tagKeyMappingStores[database]; exists {
-		return store, nil
-	}
-
-	path := filepath.Join(s.path, database, "tag_key_mappings.json")
-	store, err := NewTagKeyMappingStore(path)
+	stores, err := s.getOrCreatePerDBStores(database)
 	if err != nil {
 		return nil, err
 	}
-
-	s.tagKeyMappingStores[database] = store
-	return store, nil
+	return stores.tagKey, nil
 }
 
 // Shard returns a shard by id.
@@ -945,43 +939,23 @@ func (s *Store) DeleteDatabase(name string) error {
 	// Remove shared index for database if using inmem index.
 	delete(s.indexes, name)
 
-	// Remove field and measurement mapping stores from cache and disk.
+	// Remove per-database mapping stores from cache and disk.
 	// Always delete from the in-memory map regardless of file-remove errors so
 	// that the database is fully cleaned up even when the filesystem is broken.
 	func() {
-		s.fieldMappingMu.Lock()
-		defer s.fieldMappingMu.Unlock()
-		if store, exists := s.fieldMappingStores[name]; exists {
-			if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
-				s.Logger.Error("failed to remove field mapping file", zap.String("path", store.path), zap.Error(err))
-			}
-			os.Remove(store.path + ".bak")
-			delete(s.fieldMappingStores, name)
+		s.perDBStoresMu.Lock()
+		defer s.perDBStoresMu.Unlock()
+		stores, exists := s.perDBStores[name]
+		if !exists {
+			return
 		}
-	}()
-
-	func() {
-		s.tagKeyMappingMu.Lock()
-		defer s.tagKeyMappingMu.Unlock()
-		if store, exists := s.tagKeyMappingStores[name]; exists {
-			if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
-				s.Logger.Error("failed to remove tag key mapping file", zap.String("path", store.path), zap.Error(err))
+		for _, gs := range []*GenericMappingStore{stores.field.GenericMappingStore, stores.tagKey.GenericMappingStore, stores.measurement.GenericMappingStore} {
+			if err := os.Remove(gs.path); err != nil && !os.IsNotExist(err) {
+				s.Logger.Error("failed to remove mapping file", zap.String("path", gs.path), zap.Error(err))
 			}
-			os.Remove(store.path + ".bak")
-			delete(s.tagKeyMappingStores, name)
+			os.Remove(gs.path + ".bak")
 		}
-	}()
-
-	func() {
-		s.measurementMappingMu.Lock()
-		defer s.measurementMappingMu.Unlock()
-		if store, exists := s.measurementMappingStores[name]; exists {
-			if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
-				s.Logger.Error("failed to remove measurement mapping file", zap.String("path", store.path), zap.Error(err))
-			}
-			os.Remove(store.path + ".bak")
-			delete(s.measurementMappingStores, name)
-		}
+		delete(s.perDBStores, name)
 	}()
 
 	// Remove database from DatabaseMappingStore
@@ -2295,37 +2269,13 @@ func (s *Store) GetAllDatabaseMappings() []*DatabaseMappingInfo {
 	return store.GetAllMappings()
 }
 
-// MeasurementMappingStore returns the measurement mapping store for a database
+// MeasurementMappingStore returns the measurement mapping store for a database.
 func (s *Store) MeasurementMappingStore(database string) (*MeasurementMappingStore, error) {
-	s.measurementMappingMu.RLock()
-	store, exists := s.measurementMappingStores[database]
-	s.measurementMappingMu.RUnlock()
-
-	if exists {
-		return store, nil
-	}
-
-	// Create new store
-	s.measurementMappingMu.Lock()
-	defer s.measurementMappingMu.Unlock()
-
-	// Double-check after acquiring write lock
-	if store, exists := s.measurementMappingStores[database]; exists {
-		return store, nil
-	}
-
-	// Path: <db_path>/measurement_mappings.json
-	// We'll store it alongside the retention policy directories in the database folder
-	dbPath := filepath.Join(s.path, database)
-	mappingPath := filepath.Join(dbPath, "measurement_mappings.json")
-
-	store, err := NewMeasurementMappingStore(mappingPath)
+	stores, err := s.getOrCreatePerDBStores(database)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open measurement mapping store: %v", err)
+		return nil, err
 	}
-
-	s.measurementMappingStores[database] = store
-	return store, nil
+	return stores.measurement, nil
 }
 
 // reconcileMappings ensures that every database, measurement, and field that
