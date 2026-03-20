@@ -2350,8 +2350,25 @@ func (e *Engine) CreateIterator(ctx context.Context, measurement string, opt que
 		defer group.GetTimer(planningTimer).UpdateSince(start)
 	}
 
+	// Save user-facing Dimensions and GroupBy BEFORE translation.
+	// translateNamesInOptions replaces these with internal names for TagSets/cursor creation.
+	// All iterators that process points with user-facing tags (from createVarRefSeriesIterator)
+	// must use the original user-facing names for Tags.Subset() to return correct values.
+	userFacingDims := make([]string, len(opt.Dimensions))
+	copy(userFacingDims, opt.Dimensions)
+	userFacingGroupBy := make(map[string]struct{}, len(opt.GroupBy))
+	for k := range opt.GroupBy {
+		userFacingGroupBy[k] = struct{}{}
+	}
+
 	// Translate measurement and field names from user-facing to internal names
 	measurement, opt = e.translateNamesInOptions(measurement, opt)
+
+	// userFacingOpt: same as opt (internal field/cond exprs for cursor creation) but
+	// with user-facing Dimensions/GroupBy for iterator-level grouping/windowing.
+	userFacingOpt := opt
+	userFacingOpt.Dimensions = userFacingDims
+	userFacingOpt.GroupBy = userFacingGroupBy
 
 	if call, ok := opt.Expr.(*influxql.Call); ok {
 		if opt.Interval.IsZero() {
@@ -2366,24 +2383,24 @@ func (e *Engine) CreateIterator(ctx context.Context, measurement string, opt que
 				if err != nil {
 					return nil, err
 				}
-				return newMergeFinalizerIterator(ctx, itrs, opt, e.logger)
+				return newMergeFinalizerIterator(ctx, itrs, userFacingOpt, e.logger)
 			}
 		}
 
-		inputs, err := e.createCallIterator(ctx, measurement, call, opt)
+		inputs, err := e.createCallIterator(ctx, measurement, call, opt, userFacingOpt)
 		if err != nil {
 			return nil, err
 		} else if len(inputs) == 0 {
 			return nil, nil
 		}
-		return newMergeFinalizerIterator(ctx, inputs, opt, e.logger)
+		return newMergeFinalizerIterator(ctx, inputs, userFacingOpt, e.logger)
 	}
 
 	itrs, err := e.createVarRefIterator(ctx, measurement, opt)
 	if err != nil {
 		return nil, err
 	}
-	return newMergeFinalizerIterator(ctx, itrs, opt, e.logger)
+	return newMergeFinalizerIterator(ctx, itrs, userFacingOpt, e.logger)
 }
 
 // translateNamesInOptions translates measurement and field names in the iterator options from user-facing to internal names
@@ -2426,28 +2443,64 @@ func (e *Engine) translateNamesInOptions(measurement string, opt query.IteratorO
 		return internalMeasurement, opt
 	}
 
-	// Translate the expression
+	// Translate the expression (SELECT fields — zero out unknowns)
 	opt.Expr = e.translateExpr(opt.Expr, internalMeasurement, fieldMappingStore)
 
-	// Translate auxiliary fields
+	// Get tag key mapping store before translating aux fields so we can handle tag VarRefs.
+	tagKeyMappingStore, _ := e.store.TagKeyMappingStore(db)
+
+	// Translate auxiliary fields.
+	// Field VarRefs: translate via fieldMappingStore; zero out unknowns (dropped/renamed fields).
+	// Tag VarRefs:   translate via tagKeyMappingStore; leave unknown tags as-is (not zeroed).
 	if len(opt.Aux) > 0 {
-		// Replace the opt.Aux slice entirely with translated references
 		for i, aux := range opt.Aux {
 			if internalName, isActive := fieldMappingStore.GetInternalFieldName(internalMeasurement, aux.Val); isActive {
 				opt.Aux[i] = influxql.VarRef{Val: internalName, Type: aux.Type}
+			} else if aux.Type == influxql.Tag || (aux.Type == influxql.Unknown && tagKeyMappingStore != nil) {
+				// Tag VarRef (or Unknown type that might be a renamed tag) — try tag key translation.
+				if tagKeyMappingStore != nil {
+					if internalName, active := tagKeyMappingStore.GetInternalTagKeyName(internalMeasurement, aux.Val); active {
+						opt.Aux[i] = influxql.VarRef{Val: internalName, Type: influxql.Tag}
+					} else if aux.Type == influxql.Tag {
+						// Identity or unmapped tag key — leave as-is
+					} else {
+						// Unknown type and not a tag key — zero out
+						opt.Aux[i] = influxql.VarRef{Val: "", Type: aux.Type}
+					}
+				}
 			} else {
+				// Unknown field (dropped or renamed away) — zero out so it returns no data.
 				opt.Aux[i] = influxql.VarRef{Val: "", Type: aux.Type}
 			}
 		}
 	}
 
-	// Translate WHERE clause condition
-	opt.Condition = e.translateExpr(opt.Condition, internalMeasurement, fieldMappingStore)
+	// Translate WHERE clause condition: translate known fields AND known tag keys; leave unknowns as-is.
+	opt.Condition = e.translateConditionExpr(opt.Condition, internalMeasurement, fieldMappingStore, tagKeyMappingStore)
+
+	// Translate GROUP BY dimensions (tag keys) in both Dimensions and GroupBy.
+	if tagKeyMappingStore != nil {
+		for i, dim := range opt.Dimensions {
+			if internal, active := tagKeyMappingStore.GetInternalTagKeyName(internalMeasurement, dim); active {
+				opt.Dimensions[i] = internal
+			}
+		}
+		if len(opt.GroupBy) > 0 {
+			newGroupBy := make(map[string]struct{}, len(opt.GroupBy))
+			for dim := range opt.GroupBy {
+				if internal, active := tagKeyMappingStore.GetInternalTagKeyName(internalMeasurement, dim); active {
+					newGroupBy[internal] = struct{}{}
+				} else {
+					newGroupBy[dim] = struct{}{}
+				}
+			}
+			opt.GroupBy = newGroupBy
+		}
+	}
 
 	return internalMeasurement, opt
 }
 
-// translateExpr translates field names in an expression from user-facing to internal names
 func (e *Engine) translateExpr(expr influxql.Expr, measurement string, fieldMappingStore *tsdb.FieldMappingStore) influxql.Expr {
 	if expr == nil {
 		return nil
@@ -2466,11 +2519,47 @@ func (e *Engine) translateExpr(expr influxql.Expr, measurement string, fieldMapp
 	})
 }
 
+// translateConditionExpr translates field and tag key names in a WHERE condition expression.
+// Unlike translateExpr, unknowns are left as-is rather than zeroed out so that tag key
+// references and time references pass through correctly.
+func (e *Engine) translateConditionExpr(expr influxql.Expr, measurement string, fieldMappingStore *tsdb.FieldMappingStore, tagKeyMappingStore *tsdb.TagKeyMappingStore) influxql.Expr {
+	if expr == nil {
+		return nil
+	}
+
+	expr = influxql.CloneExpr(expr)
+	return influxql.RewriteExpr(expr, func(ex influxql.Expr) influxql.Expr {
+		if ref, ok := ex.(*influxql.VarRef); ok {
+			// Try field translation first.
+			if internalName, isActive := fieldMappingStore.GetInternalFieldName(measurement, ref.Val); isActive {
+				ref.Val = internalName
+			} else if tagKeyMappingStore != nil {
+				// Try tag key translation (only if not a known field).
+				if internalName, active := tagKeyMappingStore.GetInternalTagKeyName(measurement, ref.Val); active {
+					ref.Val = internalName
+				} else {
+					// Check if this VarRef is a known internal tag key name that has been
+					// renamed away. If so, suppress it — using an old internal name as a
+					// user-facing query key must not match data.
+					userNames := tagKeyMappingStore.GetUserTagKeyNames(measurement, []string{ref.Val})
+					if len(userNames) > 0 && userNames[0] != "" && userNames[0] != ref.Val {
+						// This is an internal name that maps to a different user-facing name,
+						// meaning this name was superseded by a rename. Zero it out.
+						ref.Val = ""
+					}
+					// else: leave as-is (time references, unknown names, identity mappings, etc.)
+				}
+			}
+		}
+		return ex
+	})
+}
+
 type indexTagSets interface {
 	TagSets(name []byte, options query.IteratorOptions) ([]*query.TagSet, error)
 }
 
-func (e *Engine) createCallIterator(ctx context.Context, measurement string, call *influxql.Call, opt query.IteratorOptions) ([]query.Iterator, error) {
+func (e *Engine) createCallIterator(ctx context.Context, measurement string, call *influxql.Call, opt query.IteratorOptions, userFacingOpt query.IteratorOptions) ([]query.Iterator, error) {
 	ref, _ := call.Args[0].(*influxql.VarRef)
 
 	if exists, err := e.index.MeasurementExists([]byte(measurement)); err != nil {
@@ -2530,7 +2619,7 @@ func (e *Engine) createCallIterator(ctx context.Context, measurement string, cal
 					input = query.NewInterruptIterator(input, opt.InterruptCh)
 				}
 
-				itr, err := query.NewCallIterator(input, opt)
+				itr, err := query.NewCallIterator(input, userFacingOpt)
 				if err != nil {
 					query.Iterators(inputs).Close()
 					return err
@@ -2538,7 +2627,7 @@ func (e *Engine) createCallIterator(ctx context.Context, measurement string, cal
 				inputs[i] = itr
 			}
 
-			itr := query.NewParallelMergeIterator(inputs, opt, runtime.GOMAXPROCS(0))
+			itr := query.NewParallelMergeIterator(inputs, userFacingOpt, runtime.GOMAXPROCS(0))
 			itrs = append(itrs, itr)
 		}
 		return nil
@@ -2886,6 +2975,39 @@ func (e *Engine) createVarRefSeriesIterator(ctx context.Context, ref *influxql.V
 	// Limit tags to only the dimensions selected.
 	dimensions := opt.GetDimensions()
 	tags = tags.Subset(dimensions)
+
+	// Reverse-translate internal tag key names to user-facing names in the output tags.
+	// After translateNamesInOptions, opt.GroupBy contains internal names (e.g. "host").
+	// The output series metadata must use user-facing names (e.g. "hostname") so the
+	// JSON response matches what the user queried.
+	if e.store != nil && len(tags.Keys()) > 0 {
+		cleanPath := filepath.Clean(e.path)
+		_, db := filepath.Split(filepath.Dir(filepath.Dir(cleanPath)))
+		if db != "" {
+			if tkStore, err := e.store.TagKeyMappingStore(db); err == nil && tkStore != nil {
+				internalKeys := tags.Keys()
+				userKeys := tkStore.GetUserTagKeyNames(name, internalKeys)
+				needsRemap := false
+				for i, k := range internalKeys {
+					if userKeys[i] != k && userKeys[i] != "" {
+						needsRemap = true
+						break
+					}
+				}
+				if needsRemap {
+					m := make(map[string]string, len(internalKeys))
+					for i, ik := range internalKeys {
+						uk := userKeys[i]
+						if uk == "" {
+							uk = ik
+						}
+						m[uk] = tags.Value(ik)
+					}
+					tags = query.NewTags(m)
+				}
+			}
+		}
+	}
 
 	// If it's only auxiliary fields then it doesn't matter what type of iterator we use.
 	if ref == nil {

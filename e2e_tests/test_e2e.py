@@ -1468,5 +1468,567 @@ class TestMovingFunctionsAfterRename(unittest.TestCase):
         self.assertEqual(len(series), 0, f"Old field name should not return data: {res}")
 
 
+class TestTagKeyRenameE2E(unittest.TestCase):
+    """End-to-end tests for RENAME TAG KEY feature."""
+
+    def test_23_basic_tag_key_rename_where(self):
+        """
+        Rename a tag key and verify WHERE clause on the new name returns data,
+        while the old name returns nothing.
+        """
+        print("\n--- Running test_23_basic_tag_key_rename_where ---")
+        DB = "e2e_db_tag_key_rename_basic"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query(
+            "ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname",
+            db=DB,
+            method="POST",
+        )
+        time.sleep(0.5)
+
+        # Query via new tag key name in WHERE
+        res = query("SELECT load FROM cpu WHERE hostname='server01'", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected 1 series after rename: {res}")
+        self.assertAlmostEqual(series[0]["values"][0][1], 1.0, places=6)
+
+        # Old tag key name should return nothing
+        res_old = query("SELECT load FROM cpu WHERE host='server01'", db=DB)
+        series_old = res_old.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series_old), 0, f"Old tag key should return no data: {res_old}")
+
+    def test_24_tag_key_rename_show_tag_keys(self):
+        """
+        After renaming a tag key, SHOW TAG KEYS should display the new name,
+        not the old one.
+        """
+        print("\n--- Running test_24_tag_key_rename_show_tag_keys ---")
+        DB = "e2e_db_tag_key_show"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query(
+            "ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname",
+            db=DB,
+            method="POST",
+        )
+        time.sleep(0.5)
+
+        res = query("SHOW TAG KEYS FROM cpu", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected 1 series in SHOW TAG KEYS: {res}")
+        tag_keys = [row[0] for row in series[0]["values"]]
+        self.assertIn("hostname", tag_keys, f"Expected 'hostname' in tag keys: {tag_keys}")
+        self.assertNotIn("host", tag_keys, f"Old tag key 'host' should not appear: {tag_keys}")
+
+    def test_25_tag_key_rename_group_by(self):
+        """
+        GROUP BY on a renamed tag key should work correctly.
+        """
+        print("\n--- Running test_25_tag_key_rename_group_by ---")
+        DB = "e2e_db_tag_key_groupby"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points([
+            "cpu,host=server01 load=1.0 1000000000",
+            "cpu,host=server02 load=2.0 2000000000",
+        ], db=DB)
+        time.sleep(0.5)
+
+        query(
+            "ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname",
+            db=DB,
+            method="POST",
+        )
+        time.sleep(0.5)
+
+        res = query("SELECT mean(load) FROM cpu GROUP BY hostname", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 2, f"Expected 2 series from GROUP BY hostname: {res}")
+        # Each series should have a 'hostname' tag in the tags dict
+        for s in series:
+            self.assertIn("hostname", s.get("tags", {}), f"Expected 'hostname' tag in series: {s}")
+
+    def test_26_tag_key_rename_explicit_select(self):
+        """
+        Explicitly selecting a renamed tag key (SELECT load, hostname FROM cpu)
+        should return the tag value under the new name.
+        Tags do NOT appear as columns in SELECT * — they require explicit selection
+        or GROUP BY. This test verifies the explicit-selection path.
+        """
+        print("\n--- Running test_26_tag_key_rename_explicit_select ---")
+        DB = "e2e_db_tag_key_explicit"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query(
+            "ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname",
+            db=DB,
+            method="POST",
+        )
+        time.sleep(0.5)
+
+        # Explicitly select the renamed tag key alongside a field.
+        res = query("SELECT load, hostname FROM cpu", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected 1 series: {res}")
+        cols = series[0]["columns"]
+        self.assertIn("hostname", cols, f"Expected 'hostname' in columns: {cols}")
+        # The value should be the original tag value.
+        hostname_idx = cols.index("hostname")
+        self.assertEqual(
+            series[0]["values"][0][hostname_idx], "server01",
+            f"Expected hostname=server01: {series[0]['values']}",
+        )
+
+    def test_27_tag_key_chain_rename(self):
+        """
+        Chain-rename: host -> h1 -> h2. Query via h2 should resolve to original data.
+        """
+        print("\n--- Running test_27_tag_key_chain_rename ---")
+        DB = "e2e_db_tag_key_chain"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO h1", db=DB, method="POST")
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY h1 TO h2", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # Query via h2
+        res = query("SELECT load FROM cpu WHERE h2='server01'", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Chain rename: expected data via h2: {res}")
+        self.assertAlmostEqual(series[0]["values"][0][1], 1.0, places=6)
+
+        # Old names should return nothing
+        for old_key in ("host", "h1"):
+            res_old = query(f"SELECT load FROM cpu WHERE {old_key}='server01'", db=DB)
+            series_old = res_old.get("results", [{}])[0].get("series", [])
+            self.assertEqual(
+                len(series_old), 0,
+                f"Old tag key '{old_key}' should return no data after chain rename: {res_old}",
+            )
+
+    def test_28_show_tag_key_mappings(self):
+        """
+        SHOW TAG KEY MAPPINGS should show correct user/internal name pairs.
+        """
+        print("\n--- Running test_28_show_tag_key_mappings ---")
+        DB = "e2e_db_tag_key_mappings"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query(
+            "ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname",
+            db=DB,
+            method="POST",
+        )
+        time.sleep(0.5)
+
+        res = query("SHOW TAG KEY MAPPINGS", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertTrue(len(series) > 0, f"Expected series from SHOW TAG KEY MAPPINGS: {res}")
+
+        found = False
+        for row in series[0]["values"]:
+            # Columns: measurement, user_name, internal_name
+            if row[0] == "cpu" and row[1] == "hostname" and row[2] == "host":
+                found = True
+                break
+        self.assertTrue(found, f"Expected (cpu, hostname, host) mapping in SHOW TAG KEY MAPPINGS: {res}")
+
+    def test_29_tag_key_rename_combined_with_measurement_rename(self):
+        """
+        Rename a measurement AND a tag key within it, then query via new names.
+        """
+        print("\n--- Running test_29_tag_key_rename_combined_with_measurement_rename ---")
+        DB = "e2e_db_tag_key_meas_combo"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        # Rename measurement cpu -> processor
+        query("ALTER MEASUREMENT cpu RENAME TO processor", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # Rename tag key host -> hostname within the new user-facing measurement name
+        query(
+            "ALTER MEASUREMENT processor RENAME TAG KEY host TO hostname",
+            db=DB,
+            method="POST",
+        )
+        time.sleep(0.3)
+
+        # Query via new measurement name and new tag key name
+        res = query("SELECT load FROM processor WHERE hostname='server01'", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(
+            len(series), 1,
+            f"Expected data via new measurement+tag key names: {res}",
+        )
+        self.assertAlmostEqual(series[0]["values"][0][1], 1.0, places=6)
+
+        # Old measurement name should not work
+        res_old = query("SELECT load FROM cpu WHERE hostname='server01'", db=DB)
+        series_old = res_old.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series_old), 0, f"Old measurement name should return nothing: {res_old}")
+
+    def test_30_tag_key_rename_error_on_active_name(self):
+        """
+        Renaming a tag key to a name already in use should return an error.
+        """
+        print("\n--- Running test_30_tag_key_rename_error_on_active_name ---")
+        DB = "e2e_db_tag_key_conflict"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01,region=us-east load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        # Attempt to rename host -> region (region already active) — should error
+        res = query(
+            "ALTER MEASUREMENT cpu RENAME TAG KEY host TO region",
+            db=DB,
+            method="POST",
+        )
+        results = res.get("results", [{}])
+        has_error = any(
+            r.get("error") or r.get("err") for r in results
+        )
+        # The response might also come as an HTTP-level error; either way,
+        # there should be no new mapping hostname=region.
+        if not has_error:
+            # Double-check: SHOW TAG KEYS should NOT show two "region" entries
+            tk_res = query("SHOW TAG KEYS FROM cpu", db=DB)
+            tk_series = tk_res.get("results", [{}])[0].get("series", [])
+            if tk_series:
+                tag_keys = [row[0] for row in tk_series[0]["values"]]
+                # host should still be present (rename failed), region should still exist
+                self.assertIn(
+                    "host", tag_keys,
+                    f"host should still exist after failed rename: {tag_keys}",
+                )
+
+
+class TestTagKeyFieldCombinedRenames(unittest.TestCase):
+    """
+    Tests that rename both a tag key AND a field, then verify SELECT, WHERE,
+    GROUP BY, and SHOW commands all use the new names correctly.
+    """
+
+    def test_31_rename_tag_key_and_field_basic(self):
+        """
+        Rename tag key host→hostname and field load→cpu_load.
+        Verify SELECT and WHERE on both new names return correct data.
+        """
+        print("\n--- Running test_31_rename_tag_key_and_field_basic ---")
+        DB = "e2e_db_tag_field_basic"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.5 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        query("ALTER MEASUREMENT cpu RENAME FIELD load TO cpu_load", db=DB, method="POST")
+        time.sleep(0.5)
+
+        # Both new names in WHERE + SELECT
+        res = query("SELECT cpu_load FROM cpu WHERE hostname='server01'", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected data via new tag+field names: {res}")
+        self.assertAlmostEqual(series[0]["values"][0][1], 1.5, places=6)
+
+        # Old tag key should return nothing
+        res_old = query("SELECT cpu_load FROM cpu WHERE host='server01'", db=DB)
+        self.assertEqual(
+            len(res_old.get("results", [{}])[0].get("series", [])), 0,
+            f"Old tag key should return no data: {res_old}",
+        )
+
+        # Old field name should return nothing
+        res_old_field = query("SELECT load FROM cpu WHERE hostname='server01'", db=DB)
+        self.assertEqual(
+            len(res_old_field.get("results", [{}])[0].get("series", [])), 0,
+            f"Old field name should return no data: {res_old_field}",
+        )
+
+    def test_32_two_tag_keys_rename_one_query_both(self):
+        """
+        Write data with two tag keys (host, region). Rename host→hostname.
+        Then run two separate WHERE queries — one on hostname, one on region —
+        and verify both return correct data from the same underlying series.
+        """
+        print("\n--- Running test_32_two_tag_keys_rename_one_query_both ---")
+        DB = "e2e_db_two_tags"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01,region=us-east load=2.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.5)
+
+        # WHERE on the renamed tag key
+        res1 = query("SELECT load FROM cpu WHERE hostname='server01'", db=DB)
+        series1 = res1.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series1), 1, f"Expected data via hostname: {res1}")
+        self.assertAlmostEqual(series1[0]["values"][0][1], 2.0, places=6)
+
+        # WHERE on the unchanged tag key
+        res2 = query("SELECT load FROM cpu WHERE region='us-east'", db=DB)
+        series2 = res2.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series2), 1, f"Expected data via region: {res2}")
+        self.assertAlmostEqual(series2[0]["values"][0][1], 2.0, places=6)
+
+        # WHERE combining both new and unchanged tag key
+        res3 = query("SELECT load FROM cpu WHERE hostname='server01' AND region='us-east'", db=DB)
+        series3 = res3.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series3), 1, f"Expected data via both tags: {res3}")
+
+    def test_33_two_tag_keys_rename_one_show_tag_keys(self):
+        """
+        With two tag keys (host, region), rename host→hostname.
+        SHOW TAG KEYS should show hostname and region (not host).
+        """
+        print("\n--- Running test_33_two_tag_keys_rename_one_show_tag_keys ---")
+        DB = "e2e_db_two_tags_show"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01,region=us-east load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.5)
+
+        res = query("SHOW TAG KEYS FROM cpu", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected 1 series in SHOW TAG KEYS: {res}")
+        tag_keys = [row[0] for row in series[0]["values"]]
+        self.assertIn("hostname", tag_keys, f"Expected 'hostname': {tag_keys}")
+        self.assertIn("region", tag_keys, f"Expected 'region': {tag_keys}")
+        self.assertNotIn("host", tag_keys, f"Old name 'host' should not appear: {tag_keys}")
+
+    def test_34_show_tag_values_with_renamed_key(self):
+        """
+        After renaming host→hostname, SHOW TAG VALUES WITH KEY = "hostname"
+        should return tag values for the renamed key.
+        """
+        print("\n--- Running test_34_show_tag_values_with_renamed_key ---")
+        DB = "e2e_db_show_tag_values_rename"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points([
+            "cpu,host=server01 load=1.0 1000000000",
+            "cpu,host=server02 load=2.0 2000000000",
+        ], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.5)
+
+        res = query('SHOW TAG VALUES FROM cpu WITH KEY = "hostname"', db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected series from SHOW TAG VALUES: {res}")
+        # Columns: [key, value]. key should be "hostname" (user-facing), values should be tag values.
+        values = series[0]["values"]
+        keys_found = [v[0] for v in values]
+        tag_values_found = [v[1] for v in values]
+        self.assertTrue(all(k == "hostname" for k in keys_found),
+                        f"All key entries should be 'hostname', got: {keys_found}")
+        self.assertIn("server01", tag_values_found, f"Expected server01: {tag_values_found}")
+        self.assertIn("server02", tag_values_found, f"Expected server02: {tag_values_found}")
+
+    def test_35_show_tag_values_regex_with_renamed_key(self):
+        """
+        SHOW TAG VALUES WITH KEY =~ /host.*/ should match the renamed tag key
+        'hostname' (user-facing), not the internal 'host'.
+        """
+        print("\n--- Running test_35_show_tag_values_regex_with_renamed_key ---")
+        DB = "e2e_db_show_tag_values_regex"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.5)
+
+        # Regex that matches the NEW user-facing name "hostname"
+        res = query('SHOW TAG VALUES FROM cpu WITH KEY =~ /hostname.*/', db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1,
+                         f"Expected results for regex matching renamed 'hostname': {res}")
+        tag_values = [v[1] for v in series[0]["values"]]
+        self.assertIn("server01", tag_values, f"Expected server01: {tag_values}")
+
+    def test_36_group_by_two_tag_keys_rename_one(self):
+        """
+        Write data with two tag keys, rename one, then GROUP BY both.
+        The result series should have tags keyed with user-facing names.
+        """
+        print("\n--- Running test_36_group_by_two_tag_keys_rename_one ---")
+        DB = "e2e_db_group_by_two"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points([
+            "cpu,host=server01,region=us-east load=1.0 1000000000",
+            "cpu,host=server02,region=us-west load=2.0 2000000000",
+        ], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.5)
+
+        res = query("SELECT mean(load) FROM cpu GROUP BY hostname, region", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 2, f"Expected 2 series from GROUP BY: {res}")
+        for s in series:
+            tags = s.get("tags", {})
+            self.assertIn("hostname", tags, f"Expected 'hostname' tag: {tags}")
+            self.assertIn("region", tags, f"Expected 'region' tag: {tags}")
+            self.assertNotIn("host", tags, f"'host' should not appear: {tags}")
+
+    def test_37_rename_both_tag_keys_sequential(self):
+        """
+        Rename both tag keys sequentially: host→hostname, region→zone.
+        Verify GROUP BY on both new names works.
+        """
+        print("\n--- Running test_37_rename_both_tag_keys_sequential ---")
+        DB = "e2e_db_rename_both_tags"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01,region=us-east load=3.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY region TO zone", db=DB, method="POST")
+        time.sleep(0.5)
+
+        # WHERE on both renamed keys
+        res = query("SELECT load FROM cpu WHERE hostname='server01' AND zone='us-east'", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected data via both renamed tags: {res}")
+        self.assertAlmostEqual(series[0]["values"][0][1], 3.0, places=6)
+
+        # GROUP BY both renamed keys
+        res_gb = query("SELECT mean(load) FROM cpu GROUP BY hostname, zone", db=DB)
+        gb_series = res_gb.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(gb_series), 1, f"Expected 1 series from GROUP BY: {res_gb}")
+        tags = gb_series[0].get("tags", {})
+        self.assertEqual(tags.get("hostname"), "server01", f"Expected hostname=server01: {tags}")
+        self.assertEqual(tags.get("zone"), "us-east", f"Expected zone=us-east: {tags}")
+
+    def test_38_rename_tag_key_and_field_group_by(self):
+        """
+        Rename both a tag key and a field. GROUP BY the renamed tag key, aggregate
+        the renamed field. Verify correct values and series tags.
+        """
+        print("\n--- Running test_38_rename_tag_key_and_field_group_by ---")
+        DB = "e2e_db_tag_field_groupby"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points([
+            "cpu,host=server01 load=10.0 1000000000",
+            "cpu,host=server02 load=20.0 2000000000",
+        ], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        query("ALTER MEASUREMENT cpu RENAME FIELD load TO cpu_load", db=DB, method="POST")
+        time.sleep(0.5)
+
+        res = query("SELECT sum(cpu_load) FROM cpu GROUP BY hostname", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 2, f"Expected 2 series from GROUP BY hostname: {res}")
+        for s in series:
+            self.assertIn("hostname", s.get("tags", {}),
+                          f"Expected 'hostname' in series tags: {s}")
+
+    def test_39_show_tag_values_with_key_in_list(self):
+        """
+        SHOW TAG VALUES WITH KEY IN ("hostname", "region") after renaming
+        host→hostname should return values for both named keys.
+        """
+        print("\n--- Running test_39_show_tag_values_with_key_in_list ---")
+        DB = "e2e_db_show_tag_values_in"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01,region=us-east load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.5)
+
+        res = query('SHOW TAG VALUES FROM cpu WITH KEY IN ("hostname", "region")', db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected results: {res}")
+        key_value_pairs = {v[0]: v[1] for v in series[0]["values"]}
+        self.assertIn("hostname", key_value_pairs,
+                      f"Expected 'hostname' key in results: {key_value_pairs}")
+        self.assertIn("region", key_value_pairs,
+                      f"Expected 'region' key in results: {key_value_pairs}")
+        self.assertEqual(key_value_pairs.get("hostname"), "server01",
+                         f"hostname value mismatch: {key_value_pairs}")
+
+    def test_40_write_after_rename_new_series_same_tag_value(self):
+        """
+        After renaming host→hostname, write a new point with hostname=server01.
+        Both the old and new point should be accessible, and SHOW TAG VALUES
+        should show server01 under 'hostname'.
+        """
+        print("\n--- Running test_40_write_after_rename_new_series_same_tag_value ---")
+        DB = "e2e_db_write_after_rename"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # Write pre-rename data with tag host=server01
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.5)
+
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # Write post-rename data with tag hostname=server01 (same series, different time)
+        write_points(["cpu,hostname=server01 load=2.0 2000000000"], db=DB)
+        time.sleep(0.5)
+
+        # Both points should be accessible via WHERE hostname='server01'
+        res = query("SELECT load FROM cpu WHERE hostname='server01'", db=DB)
+        series = res.get("results", [{}])[0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected data via hostname: {res}")
+        self.assertEqual(len(series[0]["values"]), 2,
+                         f"Expected both pre- and post-rename points: {series[0]['values']}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

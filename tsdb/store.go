@@ -105,6 +105,10 @@ type Store struct {
 	fieldMappingStores map[string]*FieldMappingStore
 	fieldMappingMu     sync.RWMutex
 
+	// Tag key mapping stores per database
+	tagKeyMappingStores map[string]*TagKeyMappingStore
+	tagKeyMappingMu     sync.RWMutex
+
 	measurementMappingStores map[string]*MeasurementMappingStore
 	measurementMappingMu     sync.RWMutex
 
@@ -127,6 +131,7 @@ func NewStore(path string) *Store {
 		Logger:                   logger,
 		baseLogger:               logger,
 		fieldMappingStores:       make(map[string]*FieldMappingStore),
+		tagKeyMappingStores:      make(map[string]*TagKeyMappingStore),
 		measurementMappingStores: make(map[string]*MeasurementMappingStore),
 	}
 }
@@ -597,6 +602,35 @@ func (s *Store) FieldMappingStore(database string) (*FieldMappingStore, error) {
 	return store, nil
 }
 
+// TagKeyMappingStore returns the tag key mapping store for a database.
+func (s *Store) TagKeyMappingStore(database string) (*TagKeyMappingStore, error) {
+	s.tagKeyMappingMu.RLock()
+	store, exists := s.tagKeyMappingStores[database]
+	s.tagKeyMappingMu.RUnlock()
+
+	if exists {
+		return store, nil
+	}
+
+	// Create new store.
+	s.tagKeyMappingMu.Lock()
+	defer s.tagKeyMappingMu.Unlock()
+
+	// Double-check after acquiring write lock.
+	if store, exists := s.tagKeyMappingStores[database]; exists {
+		return store, nil
+	}
+
+	path := filepath.Join(s.path, database, "tag_key_mappings.json")
+	store, err := NewTagKeyMappingStore(path)
+	if err != nil {
+		return nil, err
+	}
+
+	s.tagKeyMappingStores[database] = store
+	return store, nil
+}
+
 // Shard returns a shard by id.
 func (s *Store) Shard(id uint64) *Shard {
 	s.mu.RLock()
@@ -923,6 +957,18 @@ func (s *Store) DeleteDatabase(name string) error {
 			}
 			os.Remove(store.path + ".bak")
 			delete(s.fieldMappingStores, name)
+		}
+	}()
+
+	func() {
+		s.tagKeyMappingMu.Lock()
+		defer s.tagKeyMappingMu.Unlock()
+		if store, exists := s.tagKeyMappingStores[name]; exists {
+			if err := os.Remove(store.path); err != nil && !os.IsNotExist(err) {
+				s.Logger.Error("failed to remove tag key mapping file", zap.String("path", store.path), zap.Error(err))
+			}
+			os.Remove(store.path + ".bak")
+			delete(s.tagKeyMappingStores, name)
 		}
 	}()
 
@@ -2329,6 +2375,13 @@ func (s *Store) reconcileMappings() error {
 			continue
 		}
 
+		tagKeyMappingStore, err := s.TagKeyMappingStore(dbName)
+		if err != nil {
+			s.Logger.Warn("reconcile: failed to open tag key mapping store",
+				zap.String("database", dbName), zap.Error(err))
+			continue
+		}
+
 		// Collect all measurement names from shard indexes
 		measSeen := make(map[string]bool)
 		for _, sh := range shards {
@@ -2373,6 +2426,46 @@ func (s *Store) reconcileMappings() error {
 			})
 		}
 
+		// Reconcile tag key mappings per measurement using shard indexes.
+		if len(measSeen) > 0 {
+			tagKeySeen := make(map[string]map[string]bool) // measurement -> tag key set
+			is := IndexSet{}
+			for _, sh := range shards {
+				if is.SeriesFile == nil {
+					sfile, serr := sh.SeriesFile()
+					if serr == nil {
+						is.SeriesFile = sfile
+					}
+				}
+				index, ierr := sh.Index()
+				if ierr == nil {
+					is.Indexes = append(is.Indexes, index)
+				}
+			}
+			is = is.DedupeInmemIndexes()
+			for measName := range measSeen {
+				if tagKeySeen[measName] == nil {
+					tagKeySeen[measName] = make(map[string]bool)
+				}
+				is.ForEachMeasurementTagKey([]byte(measName), func(k []byte) error {
+					tagKey := string(k)
+					if tagKeySeen[measName][tagKey] {
+						return nil
+					}
+					tagKeySeen[measName][tagKey] = true
+					if _, found := tagKeyMappingStore.GetInternalTagKeyName(measName, tagKey); !found {
+						if _, err := tagKeyMappingStore.CreateTagKeyMappingDeferred(measName, tagKey); err != nil {
+							s.Logger.Warn("reconcile: failed to create tag key mapping",
+								zap.String("database", dbName),
+								zap.String("measurement", measName),
+								zap.String("tag_key", tagKey), zap.Error(err))
+						}
+					}
+					return nil
+				})
+			}
+		}
+
 		// Flush deferred saves
 		if err := measMappingStore.SaveIfDirty(); err != nil {
 			s.Logger.Warn("reconcile: failed to save measurement mappings",
@@ -2380,6 +2473,10 @@ func (s *Store) reconcileMappings() error {
 		}
 		if err := fieldMappingStore.SaveIfDirty(); err != nil {
 			s.Logger.Warn("reconcile: failed to save field mappings",
+				zap.String("database", dbName), zap.Error(err))
+		}
+		if err := tagKeyMappingStore.SaveIfDirty(); err != nil {
+			s.Logger.Warn("reconcile: failed to save tag key mappings",
 				zap.String("database", dbName), zap.Error(err))
 		}
 

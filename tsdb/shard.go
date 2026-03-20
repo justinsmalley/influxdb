@@ -560,12 +560,14 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 	// Per-batch cache for field mapping lookups: measurement -> (userName -> FieldMappingInfo).
 	// Avoids redundant GetAllMappings calls for the same measurement across points in this batch.
 	fieldMappingCache := make(map[string]map[string]*FieldMappingInfo)
+	// Per-batch cache for tag key mapping lookups: measurement -> (userName -> internalName).
+	tagKeyMappingCache := make(map[string]map[string]string)
 
 	var j int
 	translatedPoints := make([]models.Point, len(points))
 	for i, p := range points {
-		// Translate field and measurement names using mappings FIRST
-		translatedPoint, err := s.translateNames(p, fieldMappingCache)
+		// Translate field, measurement, and tag key names using mappings FIRST
+		translatedPoint, err := s.translateNames(p, fieldMappingCache, tagKeyMappingCache)
 		if err != nil {
 			return nil, nil, fmt.Errorf("name translation failed: %v", err)
 		}
@@ -717,6 +719,11 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 				return nil, nil, fmt.Errorf("flush field mappings: %v", flushErr)
 			}
 		}
+		if tagKeyMappingStore, storeErr := s.store.TagKeyMappingStore(s.database); storeErr == nil {
+			if flushErr := tagKeyMappingStore.SaveIfDirty(); flushErr != nil {
+				return nil, nil, fmt.Errorf("flush tag key mappings: %v", flushErr)
+			}
+		}
 	}
 
 	if dropped > 0 {
@@ -726,17 +733,18 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 	return translatedPoints[:j], fieldsToCreate, err
 }
 
-// translateNames translates user-facing measurement and field names to internal names using mapping stores.
-// fieldMappingCache is a per-batch cache that avoids redundant GetAllMappings calls for the same measurement.
+// translateNames translates user-facing measurement, field, and tag key names to internal names using mapping stores.
+// fieldMappingCache and tagKeyMappingCache are per-batch caches that avoid redundant GetAllMappings calls
+// for the same measurement across points in this batch.
 //
 // TOCTOU note: There is a small race window between GetInternalMeasurementName() and
-// CreateMeasurementMappingDeferred() (and similarly for fields). If a concurrent rename
+// CreateMeasurementMappingDeferred() (and similarly for fields and tag keys). If a concurrent rename
 // happens between these calls, a new identity mapping may be created under a name that is
 // about to be renamed. This is acceptable because: (1) renames are rare DDL operations,
 // (2) CreateMapping is idempotent, so the worst case is a mapping created under the
 // old name that self-corrects on the next write, and (3) a broader lock that blocks
 // all writes during renames would harm write throughput for negligible correctness gain.
-func (s *Shard) translateNames(point models.Point, fieldMappingCache map[string]map[string]*FieldMappingInfo) (models.Point, error) {
+func (s *Shard) translateNames(point models.Point, fieldMappingCache map[string]map[string]*FieldMappingInfo, tagKeyMappingCache map[string]map[string]string) (models.Point, error) {
 	if s.store == nil {
 		// No store reference - skip translation
 		return point, nil
@@ -811,13 +819,60 @@ func (s *Shard) translateNames(point models.Point, fieldMappingCache map[string]
 		}
 	}
 
-	if !needsMeasurementTranslation && !needsFieldTranslation {
+	// Translate tag keys
+	tagKeyMappingStore, err := s.store.TagKeyMappingStore(s.database)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tag key mapping store: %w", err)
+	}
+
+	// Use per-batch cache to avoid redundant GetAllMappings calls for the same measurement.
+	tagKeyDict, tagKeyCached := tagKeyMappingCache[internalMeasurement]
+	if !tagKeyCached {
+		tagKeyMappings := tagKeyMappingStore.GetAllMappings(internalMeasurement)
+		tagKeyDict = make(map[string]string, len(tagKeyMappings))
+		for _, m := range tagKeyMappings {
+			tagKeyDict[m.UserName] = m.InternalName
+		}
+		tagKeyMappingCache[internalMeasurement] = tagKeyDict
+	}
+
+	needsTagKeyTranslation := false
+	var translatedTags models.Tags
+	for _, tag := range point.Tags() {
+		tagKeyStr := string(tag.Key)
+		var internalKey string
+		if mapped, ok := tagKeyDict[tagKeyStr]; ok {
+			internalKey = mapped
+		} else {
+			// Not yet mapped — create deferred identity mapping.
+			internalKey, err = tagKeyMappingStore.CreateTagKeyMappingDeferred(internalMeasurement, tagKeyStr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create tag key mapping for %s: %w", tagKeyStr, err)
+			}
+			tagKeyDict[tagKeyStr] = internalKey
+		}
+		if internalKey != tagKeyStr {
+			needsTagKeyTranslation = true
+		}
+		translatedTags = append(translatedTags, models.Tag{Key: []byte(internalKey), Value: tag.Value})
+	}
+
+	if !needsMeasurementTranslation && !needsFieldTranslation && !needsTagKeyTranslation {
 		return point, nil
+	}
+
+	// Ensure tags remain sorted by key (required for series key consistency).
+	if needsTagKeyTranslation {
+		sort.Slice(translatedTags, func(i, j int) bool {
+			return bytes.Compare(translatedTags[i].Key, translatedTags[j].Key) < 0
+		})
+	} else {
+		translatedTags = point.Tags()
 	}
 
 	newPoint, err := models.NewPoint(
 		internalMeasurement,
-		point.Tags(),
+		translatedTags,
 		translatedFields,
 		point.Time(),
 	)
@@ -1103,9 +1158,22 @@ func (s *Shard) FieldDimensions(measurements []string) (fields map[string]influx
 			}
 		}
 
+		// Get tag key mapping store for reverse-translating internal tag key names to user-facing.
+		var tagKeyMappingStore *TagKeyMappingStore
+		if s.store != nil && s.database != "" {
+			tagKeyMappingStore, _ = s.store.TagKeyMappingStore(s.database)
+		}
+
 		indexSet := IndexSet{Indexes: []Index{index}, SeriesFile: s.sfile}
 		if err := indexSet.ForEachMeasurementTagKey([]byte(internalName), func(key []byte) error {
-			dimensions[string(key)] = struct{}{}
+			tagKey := string(key)
+			// Translate internal tag key name → user-facing name.
+			if tagKeyMappingStore != nil {
+				if userNames := tagKeyMappingStore.GetUserTagKeyNames(internalName, []string{tagKey}); len(userNames) > 0 && userNames[0] != "" {
+					tagKey = userNames[0]
+				}
+			}
+			dimensions[tagKey] = struct{}{}
 			return nil
 		}); err != nil {
 			return nil, nil, err
@@ -1183,7 +1251,16 @@ func (s *Shard) mapType(measurement, field string) (influxql.DataType, error) {
 		}
 	}
 
-	if exists, _ := engine.HasTagKey([]byte(internalMeasurement), []byte(field)); exists {
+	// Translate user-facing tag key name to internal before checking HasTagKey.
+	internalTagKey := field
+	if s.store != nil && s.database != "" {
+		if tagKeyMappingStore, err := s.store.TagKeyMappingStore(s.database); err == nil {
+			if internalName, active := tagKeyMappingStore.GetInternalTagKeyName(internalMeasurement, field); active {
+				internalTagKey = internalName
+			}
+		}
+	}
+	if exists, _ := engine.HasTagKey([]byte(internalMeasurement), []byte(internalTagKey)); exists {
 		return influxql.Tag, nil
 	}
 

@@ -155,6 +155,11 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
 		}
 		err = e.executeRenameFieldStatement(stmt, ctx.Database)
+	case *influxql.RenameTagKeyStatement:
+		if ctx.ReadOnly {
+			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
+		}
+		err = e.executeRenameTagKeyStatement(stmt, ctx.Database)
 	case *influxql.RenameMeasurementStatement:
 		if ctx.ReadOnly {
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
@@ -221,6 +226,8 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx *query
 		return e.executeShowTagValues(stmt, ctx)
 	case *influxql.ShowFieldMappingsStatement:
 		return e.executeShowFieldMappingsStatement(stmt, ctx)
+	case *influxql.ShowTagKeyMappingsStatement:
+		return e.executeShowTagKeyMappingsStatement(stmt, ctx)
 	case *influxql.ShowMeasurementMappingsStatement:
 		return e.executeShowMeasurementMappingsStatement(stmt, ctx)
 	case *influxql.ShowDatabaseMappingsStatement:
@@ -486,6 +493,53 @@ func (e *StatementExecutor) executeRenameFieldStatement(q *influxql.RenameFieldS
 		db = database
 	}
 	return e.RenameField(db, q.Measurement, q.OldName, q.NewName)
+}
+
+// executeRenameTagKeyStatement executes an ALTER MEASUREMENT RENAME TAG KEY statement.
+func (e *StatementExecutor) executeRenameTagKeyStatement(q *influxql.RenameTagKeyStatement, database string) error {
+	db := q.Database
+	if db == "" {
+		db = database
+	}
+	return e.RenameTagKey(db, q.Measurement, q.OldName, q.NewName)
+}
+
+// RenameTagKey renames a tag key in a measurement.
+func (e *StatementExecutor) RenameTagKey(database, measurement, oldName, newName string) error {
+	if e.MetaClient != nil {
+		if dbi := e.MetaClient.Database(database); dbi == nil {
+			return query.ErrDatabaseNotFound(database)
+		}
+	}
+
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
+	}
+
+	internalDatabase, err := e.translateDatabaseName(database)
+	if err != nil {
+		return err
+	}
+	database = internalDatabase
+
+	// Map to internal measurement name.
+	internalMeasurement := measurement
+	measMappingStore, err := store.MeasurementMappingStore(database)
+	if err != nil {
+		return fmt.Errorf("failed to access measurement mapping store: %w", err)
+	}
+	if internal, isActive := measMappingStore.GetInternalMeasurementName(measurement); isActive {
+		internalMeasurement = internal
+	}
+
+	tagKeyMappingStore, err := store.TagKeyMappingStore(database)
+	if err != nil {
+		return err
+	}
+
+	return tagKeyMappingStore.RenameTagKey(internalMeasurement, oldName, newName)
 }
 
 // executeRenameDatabaseStatement executes an ALTER DATABASE RENAME TO statement
@@ -1479,6 +1533,36 @@ func (e *StatementExecutor) executeShowTagKeys(q *influxql.ShowTagKeysStatement,
 		})
 	}
 
+	// Translate internal tag key names back to user-facing names.
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		if internalDB, dbErr := e.translateDatabaseName(q.Database); dbErr == nil {
+			tagKeyStore, tkErr := store.TagKeyMappingStore(internalDB)
+			measStore, msErr := store.MeasurementMappingStore(internalDB)
+			for i := range tagKeys {
+				internalMeasName := tagKeys[i].Measurement
+				// Translate tag key names (using internal measurement name).
+				if tkErr == nil {
+					userKeys := tagKeyStore.GetUserTagKeyNames(internalMeasName, tagKeys[i].Keys)
+					// Filter out empty strings (tombstoned entries, if any).
+					filtered := make([]string, 0, len(userKeys))
+					for _, k := range userKeys {
+						if k != "" {
+							filtered = append(filtered, k)
+						}
+					}
+					tagKeys[i].Keys = filtered
+				}
+				// Translate measurement name.
+				if msErr == nil {
+					userMeasNames := measStore.GetUserMeasurementNames([]string{internalMeasName})
+					if len(userMeasNames) > 0 && userMeasNames[0] != "" {
+						tagKeys[i].Measurement = userMeasNames[0]
+					}
+				}
+			}
+		}
+	}
+
 	emitted := false
 	for _, m := range tagKeys {
 		keys := m.Keys
@@ -1559,9 +1643,27 @@ func (e *StatementExecutor) executeShowTagValues(q *influxql.ShowTagValuesStatem
 		}
 	}
 
+	// Translate _tagKey conditions from user-facing → internal tag key names so the
+	// TSM engine can match against the actual (internal) tag keys stored in series.
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		if internalDB, dbErr := e.translateDatabaseName(q.Database); dbErr == nil {
+			cond = translateTagKeyCondition(cond, store, internalDB)
+		}
+	}
+
 	tagValues, err := e.TSDBStore.TagValues(ctx.Authorizer, shardIDs, cond)
 	if err != nil {
 		return ctx.Send(&query.Result{Err: err})
+	}
+
+	// Build per-database translation stores for output translation.
+	var tagKeyMappingStore *tsdb.TagKeyMappingStore
+	var measMappingStore *tsdb.MeasurementMappingStore
+	if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+		if internalDB, dbErr := e.translateDatabaseName(q.Database); dbErr == nil {
+			tagKeyMappingStore, _ = store.TagKeyMappingStore(internalDB)
+			measMappingStore, _ = store.MeasurementMappingStore(internalDB)
+		}
 	}
 
 	emitted := false
@@ -1586,13 +1688,28 @@ func (e *StatementExecutor) executeShowTagValues(q *influxql.ShowTagValuesStatem
 			continue
 		}
 
+		// Translate internal measurement name → user-facing.
+		rowName := m.Measurement
+		if measMappingStore != nil {
+			if userNames := measMappingStore.GetUserMeasurementNames([]string{m.Measurement}); len(userNames) > 0 && userNames[0] != "" {
+				rowName = userNames[0]
+			}
+		}
+
 		row := &models.Row{
-			Name:    m.Measurement,
+			Name:    rowName,
 			Columns: []string{"key", "value"},
 			Values:  make([][]interface{}, len(values)),
 		}
 		for i, v := range values {
-			row.Values[i] = []interface{}{v.Key, v.Value}
+			// Translate internal tag key name → user-facing.
+			userKey := v.Key
+			if tagKeyMappingStore != nil {
+				if userKeys := tagKeyMappingStore.GetUserTagKeyNames(m.Measurement, []string{v.Key}); len(userKeys) > 0 && userKeys[0] != "" {
+					userKey = userKeys[0]
+				}
+			}
+			row.Values[i] = []interface{}{userKey, v.Value}
 		}
 
 		if err := ctx.Send(&query.Result{
@@ -1937,15 +2054,23 @@ func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.Sho
 		return err
 	}
 
-	// Get measurement name from sources if specified
+	measMappingStore, err := store.MeasurementMappingStore(database)
+	if err != nil {
+		return err
+	}
+
+	// Get measurement name from sources if specified; translate to internal name for the lookup.
 	var measurement string
 	if stmt.Sources != nil && len(stmt.Sources) > 0 {
 		if m, ok := stmt.Sources[0].(*influxql.Measurement); ok {
 			measurement = m.Name
+			if internalMeas, ok := measMappingStore.GetInternalMeasurementName(measurement); ok {
+				measurement = internalMeas
+			}
 		}
 	}
 
-	// Get all mappings
+	// Get all mappings (keyed by internal measurement name).
 	mappings := fieldMappingStore.GetAllMappings(measurement)
 
 	// Sort mappings for deterministic output order
@@ -1960,11 +2085,94 @@ func (e *StatementExecutor) executeShowFieldMappingsStatement(stmt *influxql.Sho
 	columns := []string{"measurement", "user_name", "internal_name"}
 	values := make([][]interface{}, 0, len(mappings))
 	for _, m := range mappings {
-		values = append(values, []interface{}{m.Measurement, m.UserName, m.InternalName})
+		// Translate internal measurement name back to user-facing name.
+		userMeasNames := measMappingStore.GetUserMeasurementNames([]string{m.Measurement})
+		userMeasName := m.Measurement
+		if len(userMeasNames) > 0 && userMeasNames[0] != "" {
+			userMeasName = userMeasNames[0]
+		}
+		values = append(values, []interface{}{userMeasName, m.UserName, m.InternalName})
 	}
 
 	row := &models.Row{
 		Name:    "field_mappings",
+		Columns: columns,
+		Values:  values,
+	}
+
+	return ctx.Send(&query.Result{
+		Series: []*models.Row{row},
+	})
+}
+
+// executeShowTagKeyMappingsStatement executes a SHOW TAG KEY MAPPINGS statement.
+func (e *StatementExecutor) executeShowTagKeyMappingsStatement(stmt *influxql.ShowTagKeyMappingsStatement, ctx *query.ExecutionContext) error {
+	database := stmt.Database
+	if database == "" {
+		database = ctx.Database
+	}
+	if database == "" {
+		return fmt.Errorf("database name required")
+	}
+
+	store, ok := e.TSDBStore.(*tsdb.Store)
+	if !ok {
+		// Mock implementation or tests might not provide *tsdb.Store
+		return nil
+	}
+
+	internalDatabase, err := e.translateDatabaseName(database)
+	if err != nil {
+		return err
+	}
+	database = internalDatabase
+
+	tagKeyMappingStore, err := store.TagKeyMappingStore(database)
+	if err != nil {
+		return err
+	}
+
+	measMappingStore, err := store.MeasurementMappingStore(database)
+	if err != nil {
+		return err
+	}
+
+	// Get measurement name from sources if specified; translate to internal name for the lookup.
+	var measurement string
+	if stmt.Sources != nil && len(stmt.Sources) > 0 {
+		if m, ok := stmt.Sources[0].(*influxql.Measurement); ok {
+			measurement = m.Name
+			if internalMeas, ok := measMappingStore.GetInternalMeasurementName(measurement); ok {
+				measurement = internalMeas
+			}
+		}
+	}
+
+	// Get all mappings (keyed by internal measurement name).
+	mappings := tagKeyMappingStore.GetAllMappings(measurement)
+
+	// Sort by measurement name, then by user_name.
+	sort.Slice(mappings, func(i, j int) bool {
+		if mappings[i].Measurement != mappings[j].Measurement {
+			return mappings[i].Measurement < mappings[j].Measurement
+		}
+		return mappings[i].UserName < mappings[j].UserName
+	})
+
+	columns := []string{"measurement", "user_name", "internal_name"}
+	values := make([][]interface{}, 0, len(mappings))
+	for _, m := range mappings {
+		// Translate internal measurement name back to user-facing name.
+		userMeasNames := measMappingStore.GetUserMeasurementNames([]string{m.Measurement})
+		userMeasName := m.Measurement
+		if len(userMeasNames) > 0 && userMeasNames[0] != "" {
+			userMeasName = userMeasNames[0]
+		}
+		values = append(values, []interface{}{userMeasName, m.UserName, m.InternalName})
+	}
+
+	row := &models.Row{
+		Name:    "tag_key_mappings",
 		Columns: columns,
 		Values:  values,
 	}
@@ -2047,5 +2255,103 @@ func (e *StatementExecutor) executeShowMeasurementMappingsStatement(stmt *influx
 
 	return ctx.Send(&query.Result{
 		Series: []*models.Row{row},
+	})
+}
+
+// translateTagKeyCondition rewrites a SHOW TAG VALUES condition so that
+// _tagKey comparisons use internal tag key names instead of user-facing ones.
+// It handles EQ (exact match), NEQ, EQREGEX (regex → OR of matching internals),
+// and ListLiteral-sourced OR chains that rewriteShowTagValuesStatement produces.
+func translateTagKeyCondition(cond influxql.Expr, store *tsdb.Store, internalDB string) influxql.Expr {
+	if cond == nil {
+		return nil
+	}
+	tkStore, err := store.TagKeyMappingStore(internalDB)
+	if err != nil {
+		return cond
+	}
+
+	// Build a database-wide user→internal map (last writer wins for duplicates).
+	allMappings := tkStore.GetAllMappings("")
+	userToInternal := make(map[string]string, len(allMappings))
+	for _, m := range allMappings {
+		userToInternal[m.UserName] = m.InternalName
+	}
+
+	cond = influxql.CloneExpr(cond)
+	return influxql.RewriteExpr(cond, func(expr influxql.Expr) influxql.Expr {
+		bin, ok := expr.(*influxql.BinaryExpr)
+		if !ok {
+			return expr
+		}
+		ref, ok := bin.LHS.(*influxql.VarRef)
+		if !ok || ref.Val != "_tagKey" {
+			return expr
+		}
+
+		switch bin.Op {
+		case influxql.EQ:
+			if sl, ok := bin.RHS.(*influxql.StringLiteral); ok {
+				if internal, ok := userToInternal[sl.Val]; ok {
+					return &influxql.BinaryExpr{Op: influxql.EQ, LHS: bin.LHS, RHS: &influxql.StringLiteral{Val: internal}}
+				}
+			}
+		case influxql.NEQ:
+			if sl, ok := bin.RHS.(*influxql.StringLiteral); ok {
+				if internal, ok := userToInternal[sl.Val]; ok {
+					return &influxql.BinaryExpr{Op: influxql.NEQ, LHS: bin.LHS, RHS: &influxql.StringLiteral{Val: internal}}
+				}
+			}
+		case influxql.EQREGEX:
+			if rl, ok := bin.RHS.(*influxql.RegexLiteral); ok {
+				// Collect internal names for all user-facing names that match the regex.
+				seen := make(map[string]bool)
+				var matches []string
+				for userName, internalName := range userToInternal {
+					if rl.Val.MatchString(userName) && !seen[internalName] {
+						matches = append(matches, internalName)
+						seen[internalName] = true
+					}
+				}
+				if len(matches) == 0 {
+					// No user-facing names match — always-false condition.
+					return &influxql.BinaryExpr{Op: influxql.EQ, LHS: bin.LHS, RHS: &influxql.StringLiteral{Val: ""}}
+				}
+				if len(matches) == 1 {
+					return &influxql.BinaryExpr{Op: influxql.EQ, LHS: bin.LHS, RHS: &influxql.StringLiteral{Val: matches[0]}}
+				}
+				var result influxql.Expr
+				for _, n := range matches {
+					eq := influxql.Expr(&influxql.BinaryExpr{Op: influxql.EQ, LHS: bin.LHS, RHS: &influxql.StringLiteral{Val: n}})
+					if result == nil {
+						result = eq
+					} else {
+						result = &influxql.BinaryExpr{Op: influxql.OR, LHS: result, RHS: eq}
+					}
+				}
+				return result
+			}
+		case influxql.NEQREGEX:
+			if rl, ok := bin.RHS.(*influxql.RegexLiteral); ok {
+				// Build AND of NEQ conditions for each matching internal name.
+				seen := make(map[string]bool)
+				var result influxql.Expr
+				for userName, internalName := range userToInternal {
+					if rl.Val.MatchString(userName) && !seen[internalName] {
+						seen[internalName] = true
+						neq := influxql.Expr(&influxql.BinaryExpr{Op: influxql.NEQ, LHS: bin.LHS, RHS: &influxql.StringLiteral{Val: internalName}})
+						if result == nil {
+							result = neq
+						} else {
+							result = &influxql.BinaryExpr{Op: influxql.AND, LHS: result, RHS: neq}
+						}
+					}
+				}
+				if result != nil {
+					return result
+				}
+			}
+		}
+		return expr
 	})
 }
