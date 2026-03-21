@@ -9022,6 +9022,387 @@ func TestServer_Query_IntoTarget_Sparse(t *testing.T) {
 	}
 }
 
+// TestServer_Query_IntoTarget_CrossDatabase verifies that SELECT INTO can write
+// results to a measurement in a different database using the db..measurement form.
+func TestServer_Query_IntoTarget_CrossDatabase(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateDatabaseAndRetentionPolicy("db1", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`cpu value=10 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`cpu value=20 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:10Z").UnixNano()),
+		fmt.Sprintf(`cpu value=30 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:20Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "into cross-database",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT * INTO db1..cpu_copy FROM cpu`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"result","columns":["time","written"],"values":[["1970-01-01T00:00:00Z",3]]}]}]}`,
+		},
+		{
+			name:    "confirm results in destination db",
+			params:  url.Values{"db": []string{"db1"}},
+			command: `SELECT * FROM cpu_copy`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"cpu_copy","columns":["time","value"],"values":[["2000-01-01T00:00:00Z",10],["2000-01-01T00:00:10Z",20],["2000-01-01T00:00:20Z",30]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_IntoTarget_FullyQualified verifies that SELECT INTO writes to
+// an explicit db.rp.measurement destination.
+func TestServer_Query_IntoTarget_FullyQualified(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateDatabaseAndRetentionPolicy("db1", NewRetentionPolicySpec("rp1", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`cpu value=1 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`cpu value=2 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:10Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "into fully qualified destination",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT * INTO db1.rp1.cpu_copy FROM cpu`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"result","columns":["time","written"],"values":[["1970-01-01T00:00:00Z",2]]}]}]}`,
+		},
+		{
+			name:    "confirm results in destination rp",
+			params:  url.Values{"db": []string{"db1"}, "rp": []string{"rp1"}},
+			command: `SELECT * FROM cpu_copy`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"cpu_copy","columns":["time","value"],"values":[["2000-01-01T00:00:00Z",1],["2000-01-01T00:00:10Z",2]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_IntoTarget_MeasurementBackreference verifies that the :MEASUREMENT
+// backreference preserves source measurement names when writing to a destination DB.
+func TestServer_Query_IntoTarget_MeasurementBackreference(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateDatabaseAndRetentionPolicy("db1", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`cpu value=1 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`cpu value=2 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:10Z").UnixNano()),
+		fmt.Sprintf(`mem value=100 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`mem value=200 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:10Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			// :MEASUREMENT copies each source measurement name to the destination.
+			name:    "into with :MEASUREMENT backreference",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT * INTO db1..:MEASUREMENT FROM /.*/ GROUP BY *`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"result","columns":["time","written"],"values":[["1970-01-01T00:00:00Z",4]]}]}]}`,
+		},
+		{
+			name:    "confirm cpu in destination",
+			params:  url.Values{"db": []string{"db1"}},
+			command: `SELECT * FROM cpu`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"cpu","columns":["time","value"],"values":[["2000-01-01T00:00:00Z",1],["2000-01-01T00:00:10Z",2]]}]}]}`,
+		},
+		{
+			name:    "confirm mem in destination",
+			params:  url.Values{"db": []string{"db1"}},
+			command: `SELECT * FROM mem`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"mem","columns":["time","value"],"values":[["2000-01-01T00:00:00Z",100],["2000-01-01T00:00:10Z",200]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_IntoTarget_TagsWithGroupBy verifies SELECT INTO behaviour when
+// the source measurement has tag keys and GROUP BY * is used.  Per the InfluxDB v1
+// docs, tag values are written as string fields in the destination rather than
+// being preserved as tag keys; WHERE filters on those fields still work correctly.
+func TestServer_Query_IntoTarget_TagsWithGroupBy(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`cpu,host=serverA value=10 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`cpu,host=serverB value=20 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`cpu,host=serverA value=30 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:10Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "into with GROUP BY *",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT value INTO cpu_copy FROM cpu GROUP BY *`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"result","columns":["time","written"],"values":[["1970-01-01T00:00:00Z",3]]}]}]}`,
+		},
+		{
+			// Tag values land as string fields in the destination; WHERE still filters correctly.
+			name:    "confirm serverA points filterable by host field",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT * FROM cpu_copy WHERE host = 'serverA'`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"cpu_copy","columns":["time","host","value"],"values":[["2000-01-01T00:00:00Z","serverA",10],["2000-01-01T00:00:10Z","serverA",30]]}]}]}`,
+		},
+		{
+			name:    "confirm serverB points filterable by host field",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT * FROM cpu_copy WHERE host = 'serverB'`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"cpu_copy","columns":["time","host","value"],"values":[["2000-01-01T00:00:00Z","serverB",20]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_IntoTarget_Downsample verifies that SELECT INTO with an aggregate
+// and GROUP BY time writes downsampled results to a separate retention policy.
+func TestServer_Query_IntoTarget_Downsample(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp1h", 1, 0), false); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`cpu value=1 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`cpu value=3 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:10Z").UnixNano()),
+		fmt.Sprintf(`cpu value=5 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:20Z").UnixNano()),
+		fmt.Sprintf(`cpu value=7 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:30Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "downsample into separate rp",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT mean(value) INTO db0.rp1h.cpu_1h FROM cpu WHERE time >= '2000-01-01T00:00:00Z' AND time < '2000-01-01T00:01:00Z' GROUP BY time(30s)`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"result","columns":["time","written"],"values":[["1970-01-01T00:00:00Z",2]]}]}]}`,
+		},
+		{
+			// First 30s bucket: mean(1,3,5) = 3. Second bucket: mean(7) = 7.
+			name:    "confirm downsampled results",
+			params:  url.Values{"db": []string{"db0"}, "rp": []string{"rp1h"}},
+			command: `SELECT * FROM cpu_1h`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"cpu_1h","columns":["time","mean"],"values":[["2000-01-01T00:00:00Z",3],["2000-01-01T00:00:30Z",7]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_FieldRename_RegexMeasurement verifies that a field-name query
+// against a regex measurement selector only matches measurements where that
+// user-facing name is still active.
+//
+// Setup: two measurements that both start with a "temp" field.
+// "sensors" keeps it as "temp"; "weather" renames it to "temperature".
+// After the rename:
+//   - SELECT temp FROM /.*/ must return only sensors data.
+//   - SELECT temperature FROM /.*/ must return only weather data.
+func TestServer_Query_FieldRename_RegexMeasurement(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`sensors temp=25 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`weather temp=15 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "rename temp to temperature in weather only",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `ALTER MEASUREMENT weather RENAME FIELD temp TO temperature`,
+			exp:     `{"results":[{"statement_id":0}]}`,
+		},
+		{
+			// "temp" is active only in sensors; weather's copy was renamed away.
+			name:    "SELECT temp FROM regex returns only sensors",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT temp FROM /.*/`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"sensors","columns":["time","temp"],"values":[["2000-01-01T00:00:00Z",25]]}]}]}`,
+		},
+		{
+			// Explicit measurement: the renamed field must be readable under its new name.
+			name:    "SELECT temperature FROM weather (explicit) returns data",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT temperature FROM weather`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"weather","columns":["time","temperature"],"values":[["2000-01-01T00:00:00Z",15]]}]}]}`,
+		},
+		{
+			// "temperature" is active only in weather; sensors never had that name.
+			name:    "SELECT temperature FROM regex returns only weather",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT temperature FROM /.*/`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"weather","columns":["time","temperature"],"values":[["2000-01-01T00:00:00Z",15]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
 // This test ensures that data is not duplicated with measurements
 // of the same name.
 func TestServer_Query_DuplicateMeasurements(t *testing.T) {
@@ -9710,6 +10091,459 @@ func TestServer_Prometheus_Write(t *testing.T) {
 					t.Fatalf("test init failed: %s", err)
 				}
 			}
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_GroupBy_RenamedTagKey_Regex verifies that GROUP BY a renamed tag key via
+// regex measurement selector correctly isolates results per measurement.
+//
+// This test specifically exercises the opt.Dimensions slice aliasing bug: without the fix,
+// sensors' translateNamesInOptions call mutates opt.Dimensions[0] from "hostname" to the
+// internal name "host", corrupting the shared backing array. weather's subsequent call then
+// queries GROUP BY "host" (the internal/stored name) and finds data it shouldn't, causing
+// extra results to appear.
+func TestServer_Query_GroupBy_RenamedTagKey_Regex(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`sensors,host=server1 v=1 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`weather,host=nyc v=2 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "rename tag key host to hostname in sensors only",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `ALTER MEASUREMENT sensors RENAME TAG KEY host TO hostname`,
+			exp:     `{"results":[{"statement_id":0}]}`,
+		},
+		{
+			// GROUP BY hostname: sensors translates hostname→host (internal), finds {host:server1}
+			// → reverse-translates to {hostname:server1}. weather has no "hostname" tag and gets
+			// grouped into the empty-value group {hostname:""}.
+			//
+			// Aliasing-bug manifestation: without the Dimensions copy fix, sensors' call mutates
+			// the shared opt.Dimensions[0] from "hostname" to "host". weather then queries GROUP BY
+			// "host" (a real stored key) and returns {host:nyc} instead of {hostname:""}. The test
+			// catches this because {host:nyc} ≠ {hostname:""}.
+			name:    "SELECT mean(v) GROUP BY hostname: sensors gets hostname=server1, weather gets hostname=empty",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT mean(v) FROM /.*/ GROUP BY hostname`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"sensors","tags":{"hostname":"server1"},"columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",1]]},{"name":"weather","tags":{"hostname":""},"columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",2]]}]}]}`,
+		},
+		{
+			// GROUP BY host: "host" is not an active user tag key in sensors (renamed to hostname),
+			// so no Dimensions translation occurs. Both measurements have the physical stored key
+			// "host". Sensors' series-level tags are reverse-translated to {hostname:server1}, but
+			// the userFacingOpt still groups by "host", so sensors produces {host:""}. Weather is
+			// unchanged → {host:nyc}. No aliasing bug path here since no active translation fires.
+			name:    "SELECT mean(v) GROUP BY host: sensors gets host=empty, weather gets host=nyc",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT mean(v) FROM /.*/ GROUP BY host`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"sensors","tags":{"host":""},"columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",1]]},{"name":"weather","tags":{"host":"nyc"},"columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",2]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_RegexFieldSelector_PartialRename verifies that SELECT /regex/ FROM /.*/
+// correctly returns per-measurement data after a partial rename.
+//
+// sensors renames temp→temperature; weather keeps temp. The regex /temp.*/ matches both
+// "temp" and "temperature" across all measurements. InfluxDB merges the union of matched
+// column names: sensors returns temperature=25 (temp=null), weather returns temp=15 (temperature=null).
+// This verifies that data is correctly isolated per measurement despite the shared column schema.
+func TestServer_Query_RegexFieldSelector_PartialRename(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`sensors temp=25 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`weather temp=15 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "rename temp to temperature in sensors only",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature`,
+			exp:     `{"results":[{"statement_id":0}]}`,
+		},
+		{
+			// /temp.*/ matches "temperature" in sensors and "temp" in weather. InfluxDB builds a
+			// union column schema ["temp","temperature"] for the merged result. sensors has
+			// temperature=25 (temp=null); weather has temp=15 (temperature=null). Data is isolated
+			// correctly — neither measurement leaks data into the other's column.
+			name:    "SELECT /temp.*/ FROM regex: sensors gets temperature=25, weather gets temp=15",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT /temp.*/ FROM /.*/`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"sensors","columns":["time","temp","temperature"],"values":[["2000-01-01T00:00:00Z",null,25]]},{"name":"weather","columns":["time","temp","temperature"],"values":[["2000-01-01T00:00:00Z",15,null]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_WriteUnderNewNameAfterRename verifies that writing under the new user-facing
+// name after a rename lands in the same internal slot as the original data.
+//
+// temp→temperature rename: both the original write (as temp=25) and a new write (as temperature=30)
+// should be readable as "temperature", because createMappingLocked returns the existing internal
+// slot when the user name is already mapped.
+func TestServer_Query_WriteUnderNewNameAfterRename(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	t1 := mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()
+	t2 := mustParseTime(time.RFC3339Nano, "2000-01-01T00:01:00Z").UnixNano()
+
+	// Write initial data under the old field name.
+	s.MustWrite("db0", "rp0", fmt.Sprintf("cpu temp=25 %d", t1), nil)
+
+	// Rename the field.
+	if _, err := s.QueryWithParams(`ALTER MEASUREMENT cpu RENAME FIELD temp TO temperature`, url.Values{"db": []string{"db0"}}); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+
+	// Write new data under the new field name. This should map to the same internal slot.
+	s.MustWrite("db0", "rp0", fmt.Sprintf("cpu temperature=30 %d", t2), nil)
+
+	// Both points should be visible as "temperature".
+	result, err := s.QueryWithParams(`SELECT temperature FROM cpu`, url.Values{"db": []string{"db0"}})
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	exp := `{"results":[{"statement_id":0,"series":[{"name":"cpu","columns":["time","temperature"],"values":[["2000-01-01T00:00:00Z",25],["2000-01-01T00:01:00Z",30]]}]}]}`
+	if result != exp {
+		t.Errorf("unexpected result\nexp:    %s\nactual: %s", exp, result)
+	}
+}
+
+// TestServer_Query_WriteUnderOldNameAfterRename verifies that writing under the old name after
+// a rename creates a new versioned internal slot (e.g. "temp.v2") and does not contaminate
+// the data readable under the new name.
+func TestServer_Query_WriteUnderOldNameAfterRename(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	t1 := mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()
+	t2 := mustParseTime(time.RFC3339Nano, "2000-01-01T00:01:00Z").UnixNano()
+
+	// Write initial data under the old field name.
+	s.MustWrite("db0", "rp0", fmt.Sprintf("cpu temp=25 %d", t1), nil)
+
+	// Rename the field.
+	if _, err := s.QueryWithParams(`ALTER MEASUREMENT cpu RENAME FIELD temp TO temperature`, url.Values{"db": []string{"db0"}}); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+
+	// Write new data under the old name again. This should go to a NEW internal slot (temp.v2).
+	s.MustWrite("db0", "rp0", fmt.Sprintf("cpu temp=99 %d", t2), nil)
+
+	// SELECT temperature must return only the original 25 point (stored at internal "temp").
+	result, err := s.QueryWithParams(`SELECT temperature FROM cpu`, url.Values{"db": []string{"db0"}})
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	expTemp := `{"results":[{"statement_id":0,"series":[{"name":"cpu","columns":["time","temperature"],"values":[["2000-01-01T00:00:00Z",25]]}]}]}`
+	if result != expTemp {
+		t.Errorf("SELECT temperature: unexpected result\nexp:    %s\nactual: %s", expTemp, result)
+	}
+
+	// SELECT temp must return only the new 99 point (stored at internal "temp.v2").
+	result, err = s.QueryWithParams(`SELECT temp FROM cpu`, url.Values{"db": []string{"db0"}})
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	expOld := `{"results":[{"statement_id":0,"series":[{"name":"cpu","columns":["time","temp"],"values":[["2000-01-01T00:01:00Z",99]]}]}]}`
+	if result != expOld {
+		t.Errorf("SELECT temp: unexpected result\nexp:    %s\nactual: %s", expOld, result)
+	}
+}
+
+// TestServer_Query_AggregateRegex_PartialFieldRename verifies that mean() via a regex
+// measurement selector correctly excludes measurements where the queried field was renamed away.
+func TestServer_Query_AggregateRegex_PartialFieldRename(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	t1 := mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()
+	t2 := mustParseTime(time.RFC3339Nano, "2000-01-01T00:01:00Z").UnixNano()
+
+	writes := []string{
+		fmt.Sprintf(`sensors temp=10 %d`, t1),
+		fmt.Sprintf(`sensors temp=20 %d`, t2),
+		fmt.Sprintf(`weather temp=5 %d`, t1),
+		fmt.Sprintf(`weather temp=15 %d`, t2),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "rename temp to temperature in sensors only",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature`,
+			exp:     `{"results":[{"statement_id":0}]}`,
+		},
+		{
+			// mean(temp): sensors no longer has "temp" → empty; weather mean=(5+15)/2=10.
+			name:    "SELECT mean(temp) FROM regex returns only weather",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT mean(temp) FROM /.*/`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"weather","columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",10]]}]}]}`,
+		},
+		{
+			// mean(temperature): weather never had "temperature" → empty; sensors mean=(10+20)/2=15.
+			name:    "SELECT mean(temperature) FROM regex returns only sensors",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT mean(temperature) FROM /.*/`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"sensors","columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",15]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_ExplicitList_PartialFieldRename verifies that an explicit measurement
+// list (non-regex) correctly handles a partial field rename: sensors renamed temp→temperature,
+// weather did not. SELECT temp FROM sensors, weather must return only weather data.
+func TestServer_Query_ExplicitList_PartialFieldRename(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	t1 := mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()
+	t2 := mustParseTime(time.RFC3339Nano, "2000-01-01T00:01:00Z").UnixNano()
+
+	writes := []string{
+		fmt.Sprintf(`sensors temp=10 %d`, t1),
+		fmt.Sprintf(`sensors temp=20 %d`, t2),
+		fmt.Sprintf(`weather temp=5 %d`, t1),
+		fmt.Sprintf(`weather temp=15 %d`, t2),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "rename temp to temperature in sensors only",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature`,
+			exp:     `{"results":[{"statement_id":0}]}`,
+		},
+		{
+			// Explicit list: sensors has no "temp" after rename → excluded; weather returns both points.
+			name:    "SELECT temp FROM sensors,weather returns only weather",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT temp FROM sensors, weather`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"weather","columns":["time","temp"],"values":[["2000-01-01T00:00:00Z",5],["2000-01-01T00:01:00Z",15]]}]}]}`,
+		},
+		{
+			// Confirm sensors data is accessible under the new name.
+			name:    "SELECT temperature FROM sensors,weather returns only sensors",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT temperature FROM sensors, weather`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"sensors","columns":["time","temperature"],"values":[["2000-01-01T00:00:00Z",10],["2000-01-01T00:01:00Z",20]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
+			if query.skip {
+				t.Skipf("SKIP:: %s", query.name)
+			}
+			if err := query.Execute(s); err != nil {
+				t.Error(query.Error(err))
+			} else if !query.success() {
+				t.Error(query.failureMessage())
+			}
+		})
+	}
+}
+
+// TestServer_Query_FieldAndTagKeyRename_Regex verifies that field rename and tag key rename
+// in the same measurement interact correctly with regex queries.
+//
+// sensors renames field temp→temperature AND tag key host_id→host.
+// weather is unchanged. All queries use the regex measurement selector.
+func TestServer_Query_FieldAndTagKeyRename_Regex(t *testing.T) {
+	t.Parallel()
+	s := OpenServer(NewConfig())
+	defer s.Close()
+
+	if err := s.CreateDatabaseAndRetentionPolicy("db0", NewRetentionPolicySpec("rp0", 1, 0), true); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := []string{
+		fmt.Sprintf(`sensors,host_id=server1 temp=25 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+		fmt.Sprintf(`weather,host_id=nyc temp=15 %d`, mustParseTime(time.RFC3339Nano, "2000-01-01T00:00:00Z").UnixNano()),
+	}
+
+	test := NewTest("db0", "rp0")
+	test.writes = Writes{
+		&Write{data: strings.Join(writes, "\n")},
+	}
+
+	test.addQueries([]*Query{
+		{
+			name:    "rename field temp to temperature in sensors only",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature`,
+			exp:     `{"results":[{"statement_id":0}]}`,
+		},
+		{
+			name:    "rename tag key host_id to host in sensors only",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `ALTER MEASUREMENT sensors RENAME TAG KEY host_id TO host`,
+			exp:     `{"results":[{"statement_id":0}]}`,
+		},
+		{
+			// Field rename: sensors has temperature, weather has temp.
+			name:    "SELECT temperature FROM regex returns only sensors",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT temperature FROM /.*/`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"sensors","columns":["time","temperature"],"values":[["2000-01-01T00:00:00Z",25]]}]}]}`,
+		},
+		{
+			name:    "SELECT temp FROM regex returns only weather",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT temp FROM /.*/`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"weather","columns":["time","temp"],"values":[["2000-01-01T00:00:00Z",15]]}]}]}`,
+		},
+		{
+			// Tag key rename + field select: SELECT temperature GROUP BY host.
+			// sensors: temperature active, GROUP BY host→host_id (internal) → {host_id:server1} →
+			// reverse-translated to {host:server1} in output.
+			// weather: temperature not a field → empty.
+			name:    "SELECT mean(temperature) GROUP BY host returns only sensors",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT mean(temperature) FROM /.*/ GROUP BY host`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"sensors","tags":{"host":"server1"},"columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",25]]}]}]}`,
+		},
+		{
+			// Tag key rename + field select: SELECT mean(temp) GROUP BY host_id.
+			// sensors: temp not active (renamed to temperature) → empty.
+			// weather: temp active, GROUP BY host_id (identity for weather) → {host_id:nyc}.
+			name:    "SELECT mean(temp) GROUP BY host_id returns only weather",
+			params:  url.Values{"db": []string{"db0"}},
+			command: `SELECT mean(temp) FROM /.*/ GROUP BY host_id`,
+			exp:     `{"results":[{"statement_id":0,"series":[{"name":"weather","tags":{"host_id":"nyc"},"columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",15]]}]}]}`,
+		},
+	}...)
+
+	if err := test.init(s); err != nil {
+		t.Fatalf("test init failed: %s", err)
+	}
+
+	for _, query := range test.queries {
+		t.Run(query.name, func(t *testing.T) {
 			if query.skip {
 				t.Skipf("SKIP:: %s", query.name)
 			}

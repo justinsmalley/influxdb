@@ -2453,6 +2453,10 @@ func (e *Engine) translateNamesInOptions(measurement string, opt query.IteratorO
 	// Field VarRefs: translate via fieldMappingStore; zero out unknowns (dropped/renamed fields).
 	// Tag VarRefs:   translate via tagKeyMappingStore; leave unknown tags as-is (not zeroed).
 	if len(opt.Aux) > 0 {
+		// Copy the slice so mutations don't alias the caller's (or a sibling measurement's) Aux slice.
+		auxCopy := make([]influxql.VarRef, len(opt.Aux))
+		copy(auxCopy, opt.Aux)
+		opt.Aux = auxCopy
 		for i, aux := range opt.Aux {
 			if internalName, isActive := fieldMappingStore.GetInternalFieldName(internalMeasurement, aux.Val); isActive {
 				opt.Aux[i] = influxql.VarRef{Val: internalName, Type: aux.Type}
@@ -2480,6 +2484,12 @@ func (e *Engine) translateNamesInOptions(measurement string, opt query.IteratorO
 
 	// Translate GROUP BY dimensions (tag keys) in both Dimensions and GroupBy.
 	if tagKeyMappingStore != nil {
+		if len(opt.Dimensions) > 0 {
+			// Copy the slice so mutations don't alias the caller's (or a sibling measurement's) Dimensions slice.
+			dimCopy := make([]string, len(opt.Dimensions))
+			copy(dimCopy, opt.Dimensions)
+			opt.Dimensions = dimCopy
+		}
 		for i, dim := range opt.Dimensions {
 			if internal, active := tagKeyMappingStore.GetInternalTagKeyName(internalMeasurement, dim); active {
 				opt.Dimensions[i] = internal
