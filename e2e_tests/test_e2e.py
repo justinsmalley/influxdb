@@ -1209,12 +1209,7 @@ class TestInfluxDBE2E(unittest.TestCase):
         import os
 
         # Skip if not running in Docker E2E environment
-        container_name = os.environ.get("INFLUXDB_CONTAINER", "")
-        if not container_name:
-            self.skipTest(
-                "INFLUXDB_CONTAINER env var not set; "
-                "skipping container restart test"
-            )
+        container_name = os.environ.get("INFLUXDB_CONTAINER", "influxdb-modified")
 
         DB = "e2e_db_restart_reconcile"
         query(f"DROP DATABASE {DB}", db="", method="POST")
@@ -1236,7 +1231,7 @@ class TestInfluxDBE2E(unittest.TestCase):
             check=True, timeout=30,
         )
 
-        # Wait for the container to be ready
+        # Wait for the container to be ready (HTTP connectivity).
         for attempt in range(30):
             try:
                 query("SHOW DATABASES", db="")
@@ -1245,6 +1240,16 @@ class TestInfluxDBE2E(unittest.TestCase):
                 time.sleep(1)
         else:
             self.fail("Container did not restart within 30 seconds")
+
+        # Wait for the specific shard/mapping to be fully loaded. In the full
+        # test suite many shards exist from earlier tests; loading them all takes
+        # longer than just passing the HTTP ping. Poll until our renamed field is
+        # accessible or we time out.
+        for attempt in range(15):
+            res_wait = query("SELECT f_renamed FROM meas_before", db=DB)
+            if res_wait.get("results", [{}])[0].get("series"):
+                break
+            time.sleep(1)
 
         # 3. Verify existing rename is preserved (reconciliation must not
         #    overwrite existing mappings)
@@ -2451,6 +2456,268 @@ class TestTagKeyFieldCombinedRenames(unittest.TestCase):
         self.assertAlmostEqual(val2, 30.0, places=6,
                                msg=f"Subquery alias 'c' should resolve to inner result "
                                    f"(30.0), not double-mapped to internal-b (20.0); got {val2}")
+
+
+    # --- SELECT INTO with renamed destination (tests 58-59) -----------
+
+    def test_58_select_into_renamed_destination(self):
+        """SELECT INTO a destination measurement that was previously renamed."""
+        DB = "e2e_db_into_renamed_dest"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # Pre-populate dest with one point before the rename.
+        write_points(["dest,tag=1 val=5.0 1000000000"], db=DB)
+        # Write the source data.
+        write_points(["src,tag=1 val=9.0 2000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT dest RENAME TO dest_renamed", db=DB, method="POST")
+        time.sleep(0.3)
+
+        query("SELECT val INTO dest_renamed FROM src WHERE time > 0 GROUP BY *",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest_renamed WHERE time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1,
+                         f"dest_renamed should have data: {res}")
+        self.assertEqual(len(series[0]["values"]), 2,
+                         "Expected 2 points: pre-rename data AND newly copied data")
+        cols = series[0]["columns"]
+        vi = cols.index("val")
+        vals = {row[vi] for row in series[0]["values"]}
+        self.assertIn(5.0, vals, "Pre-rename point (val=5.0) should still be in dest_renamed")
+        self.assertIn(9.0, vals, "Newly copied point (val=9.0) should be written into dest_renamed")
+
+    def test_59_select_into_both_src_dest_renamed_swap(self):
+        """
+        SELECT INTO where both source and dest are renamed via a name swap.
+
+        After the swap:
+          user 'a' → internal 'b'  (original b's storage, val=2.0)
+          user 'b' → internal 'a'  (original a's storage, val=1.0)
+
+        Query: SELECT val INTO a FROM b GROUP BY *
+          - FROM b  → reads internal a → val=1.0
+          - INTO a  → writes to internal b (alongside existing val=2.0)
+
+        Verifies that source and dest name resolution are independent in the same query.
+        """
+        DB = "e2e_db_into_swap_src_dest"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["a,tag=1 val=1.0 1000000000",
+                      "b,tag=1 val=2.0 2000000000"], db=DB)
+        time.sleep(0.3)
+
+        # Swap names: a→tmp, b→a, tmp→b
+        query("ALTER MEASUREMENT a RENAME TO tmp", db=DB, method="POST")
+        query("ALTER MEASUREMENT b RENAME TO a", db=DB, method="POST")
+        query("ALTER MEASUREMENT tmp RENAME TO b", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # After swap: user 'a' → internal 'b' (val=2.0), user 'b' → internal 'a' (val=1.0)
+        query("SELECT val INTO a FROM b WHERE time > 0 GROUP BY *",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        # 'a' (internal b) should now have original val=2.0 AND the copied val=1.0
+        res_a = query("SELECT * FROM a WHERE time > 0", db=DB)
+        series_a = res_a["results"][0].get("series", [])
+        self.assertEqual(len(series_a), 1,
+                         f"'a' should have data: {res_a}")
+        self.assertEqual(len(series_a[0]["values"]), 2,
+                         f"'a' should have 2 points (original + copied): {series_a[0]['values']}")
+        cols_a = series_a[0]["columns"]
+        vi_a = cols_a.index("val")
+        vals_a = {row[vi_a] for row in series_a[0]["values"]}
+        self.assertIn(2.0, vals_a, "'a' should contain original val=2.0")
+        self.assertIn(1.0, vals_a, "'a' should contain copied val=1.0")
+
+        # 'b' (internal a) should be unchanged — only 1 point
+        res_b = query("SELECT * FROM b WHERE time > 0", db=DB)
+        series_b = res_b["results"][0].get("series", [])
+        self.assertEqual(len(series_b), 1,
+                         f"'b' should still have its original data: {res_b}")
+        self.assertEqual(len(series_b[0]["values"]), 1,
+                         "'b' should have exactly 1 point (no writes happened to it)")
+        cols_b = series_b[0]["columns"]
+        vi_b = cols_b.index("val")
+        self.assertAlmostEqual(series_b[0]["values"][0][vi_b], 1.0, places=6,
+                               msg="'b' should still have val=1.0")
+
+
+    def test_60_select_into_renamed_dest_with_renamed_field(self):
+        """SELECT INTO a renamed destination where the source field was also renamed."""
+        DB = "e2e_db_into_renamedest_renamedfield"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["src,tag=1 temp=7.0 1000000000"], db=DB)
+        write_points(["dest_old,tag=1 other=0.0 2000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT src RENAME FIELD temp TO temperature", db=DB, method="POST")
+        query("ALTER MEASUREMENT dest_old RENAME TO dest_new", db=DB, method="POST")
+        time.sleep(0.3)
+
+        query("SELECT temperature INTO dest_new FROM src WHERE time > 0 GROUP BY *",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest_new WHERE time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest_new should have data: {res}")
+        cols = series[0]["columns"]
+        self.assertIn("temperature", cols,
+                      "Copied field should appear as user-facing name 'temperature', not internal 'temp'")
+        ti = cols.index("temperature")
+        written_vals = [row[ti] for row in series[0]["values"] if row[ti] is not None]
+        self.assertIn(7.0, written_vals,
+                      "Copied value 7.0 should be in dest_new under column 'temperature'")
+
+    def test_61_select_into_renamed_dest_with_renamed_tag_key(self):
+        """SELECT INTO a renamed destination where the source tag key was also renamed.
+
+        Uses distinct tag values for src (host=src_host) and dest_old (host=dest_host)
+        so the pre-existing dest data and the newly copied data are unambiguously
+        separable in assertions.
+        """
+        DB = "e2e_db_into_renamedest_renamedtag"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # Write src data with tag host=src_host; write pre-existing dest data with host=dest_host.
+        write_points(["src,host=src_host load=3.0 1000000000"], db=DB)
+        write_points(["dest_old,host=dest_host load=0.0 2000000000"], db=DB)
+        time.sleep(0.3)
+        # Rename src tag key only (not dest_old).
+        query("ALTER MEASUREMENT src RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        # Rename dest measurement.
+        query("ALTER MEASUREMENT dest_old RENAME TO dest_new", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # Copy src data into dest_new; src is now filtered via renamed tag 'hostname'.
+        query("SELECT load INTO dest_new FROM src WHERE hostname='src_host' AND time > 0 GROUP BY hostname",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        # Newly copied point must be queryable via 'hostname=src_host' in dest_new.
+        res = query("SELECT * FROM dest_new WHERE hostname='src_host' AND time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1,
+                         f"dest_new should be queryable via 'hostname=src_host': {res}")
+        cols = series[0]["columns"]
+        li = cols.index("load")
+        copied_vals = [row[li] for row in series[0]["values"] if row[li] == 3.0]
+        self.assertEqual(len(copied_vals), 1,
+                         "Copied load=3.0 should appear in dest_new under hostname=src_host")
+
+        # Pre-existing dest_old data (load=0.0, host=dest_host) should still be accessible.
+        res_old = query("SELECT * FROM dest_new WHERE time > 0", db=DB)
+        all_series = res_old["results"][0].get("series", [])
+        all_vals = []
+        for s in all_series:
+            lj = s["columns"].index("load") if "load" in s["columns"] else None
+            if lj is not None:
+                all_vals.extend([row[lj] for row in s["values"]])
+        self.assertIn(0.0, all_vals,
+                      "Pre-existing dest_old point (load=0.0) should still be in dest_new")
+
+
+    # --- SELECT INTO with regex and wildcard GROUP BY (tests 62-64) ---
+
+    def test_62_regex_field_select_into_after_rename(self):
+        """SELECT /regex/ INTO dest FROM src matches user-facing field name after rename."""
+        DB = "e2e_db_into_regex_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["src temp=7.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT src RENAME FIELD temp TO temperature", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # Regex /temp.*/ should match user-facing name 'temperature', not internal 'temp'.
+        query("SELECT /temp.*/ INTO dest FROM src WHERE time > 0", db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest should have data from regex selection: {res}")
+        cols = series[0]["columns"]
+        self.assertIn("temperature", cols,
+                      "Regex /temp.*/ should match user-facing name 'temperature'")
+        self.assertNotIn("temp", cols,
+                         "Internal name 'temp' should not appear as a column")
+        ti = cols.index("temperature")
+        vals = [row[ti] for row in series[0]["values"] if row[ti] is not None]
+        self.assertIn(7.0, vals, "Value 7.0 should be written to dest")
+
+    def test_63_wildcard_select_into_group_by_star_with_renamed_field_and_tag(self):
+        """SELECT * INTO dest GROUP BY * after renaming both a field and a tag key."""
+        DB = "e2e_db_into_star_groupby_star"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["src,host=h1 f=5.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT src RENAME FIELD f TO field_new", db=DB, method="POST")
+        query("ALTER MEASUREMENT src RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.3)
+
+        query("SELECT * INTO dest FROM src WHERE time > 0 GROUP BY *", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # dest should be queryable via renamed tag key and renamed field.
+        res = query("SELECT * FROM dest WHERE hostname='h1' AND time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1,
+                         f"dest should be queryable via renamed tag 'hostname': {res}")
+        cols = series[0]["columns"]
+        self.assertIn("field_new", cols,
+                      "Wildcard SELECT * should write user-facing field name 'field_new'")
+        self.assertNotIn("f", cols,
+                         "Internal field name 'f' should not appear in dest")
+        fi = cols.index("field_new")
+        vals = [row[fi] for row in series[0]["values"]]
+        self.assertIn(5.0, vals, "Value 5.0 should be present in dest")
+
+    def test_64_regex_field_select_into_group_by_star_with_renames(self):
+        """SELECT /regex/ INTO dest GROUP BY * after renaming a field and a tag key.
+
+        Verifies regex matches user-facing field name AND GROUP BY * preserves the
+        renamed tag key in dest.
+        """
+        DB = "e2e_db_into_regex_groupby_star"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["src,host=h1 sensor_val=9.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT src RENAME FIELD sensor_val TO sensor_reading",
+              db=DB, method="POST")
+        query("ALTER MEASUREMENT src RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # /sensor.*/ should match user-facing 'sensor_reading', not internal 'sensor_val'.
+        query("SELECT /sensor.*/ INTO dest FROM src WHERE time > 0 GROUP BY *",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE hostname='h1' AND time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1,
+                         f"dest should be queryable via 'hostname=h1' after regex+GROUP BY *: {res}")
+        cols = series[0]["columns"]
+        self.assertIn("sensor_reading", cols,
+                      "Regex /sensor.*/ should match user-facing name 'sensor_reading'")
+        self.assertNotIn("sensor_val", cols,
+                         "Internal name 'sensor_val' should not appear in dest")
+        si = cols.index("sensor_reading")
+        vals = [row[si] for row in series[0]["values"]]
+        self.assertIn(9.0, vals, "Value 9.0 should be written to dest")
 
 
 if __name__ == "__main__":
