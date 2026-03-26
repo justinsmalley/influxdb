@@ -1065,7 +1065,7 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 
 		// Write points back into system for INTO statements.
 		if stmt.Target != nil {
-			n, err := e.writeInto(pointsWriter, stmt, row)
+			n, err := e.writeInto(pointsWriter, stmt, row, ctx.Database)
 			if err != nil {
 				return err
 			}
@@ -1814,7 +1814,7 @@ func (w *BufferedPointsWriter) Len() int { return len(w.buf) }
 // Cap returns the capacity (in points) of the buffer.
 func (w *BufferedPointsWriter) Cap() int { return cap(w.buf) }
 
-func (e *StatementExecutor) writeInto(w pointsWriter, stmt *influxql.SelectStatement, row *models.Row) (n int64, err error) {
+func (e *StatementExecutor) writeInto(w pointsWriter, stmt *influxql.SelectStatement, row *models.Row, sourceDB string) (n int64, err error) {
 	if stmt.Target.Measurement.Database == "" {
 		return 0, errNoDatabaseInTarget
 	}
@@ -1829,6 +1829,26 @@ func (e *StatementExecutor) writeInto(w pointsWriter, stmt *influxql.SelectState
 	name := stmt.Target.Measurement.Name
 	if name == "" {
 		name = row.Name
+	}
+
+	// row.Tags contains internal tag key names from the TSM series index.
+	// Reverse-translate them to user-facing names so the destination measurement
+	// receives the correct (user-visible) tag keys.
+	if len(row.Tags) > 0 {
+		if store, ok := e.TSDBStore.(*tsdb.Store); ok {
+			if tkStore, tkErr := store.TagKeyMappingStore(sourceDB); tkErr == nil {
+				translatedTags := make(map[string]string, len(row.Tags))
+				for k, v := range row.Tags {
+					userKeys := tkStore.GetUserTagKeyNames(row.Name, []string{k})
+					if len(userKeys) > 0 && userKeys[0] != "" {
+						translatedTags[userKeys[0]] = v
+					} else {
+						translatedTags[k] = v
+					}
+				}
+				row.Tags = translatedTags
+			}
+		}
 	}
 
 	points, err := convertRowToPoints(name, row)

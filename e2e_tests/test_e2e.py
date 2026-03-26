@@ -24,6 +24,11 @@ def query(q, db=DB_NAME, method="GET"):
         raise Exception(f"HTTP Error {e.code}: {body}")
 
 
+def insert_point(line, db=DB_NAME):
+    """Single-point write via line protocol (INSERT synonym — same /write path as write_points)."""
+    return write_points([line], db=db)
+
+
 def write_points(lines, db=DB_NAME, rp=None):
     data = "\n".join(lines).encode("utf-8")
     url = f"{API_URL}/write?db={db}"
@@ -2028,6 +2033,424 @@ class TestTagKeyFieldCombinedRenames(unittest.TestCase):
         self.assertEqual(len(series), 1, f"Expected data via hostname: {res}")
         self.assertEqual(len(series[0]["values"]), 2,
                          f"Expected both pre- and post-rename points: {series[0]['values']}")
+
+
+    # ------------------------------------------------------------------
+    # Tests 41-57: write-after-operation coverage
+    # ------------------------------------------------------------------
+
+    # --- SQL INSERT after rename/drop (tests 41-45) -------------------
+
+    def test_41_insert_after_rename_measurement(self):
+        """INSERT (via /query) to renamed measurement lands in correct shard."""
+        DB = "e2e_db_insert_rename_meas"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["m_orig,tag=1 val=10.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT m_orig RENAME TO m_new", db=DB, method="POST")
+
+        insert_point("m_new,tag=1 val=20.0 2000000000", db=DB)
+        time.sleep(0.3)
+
+        res = query("SELECT val FROM m_new", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected series for m_new: {res}")
+        self.assertEqual(len(series[0]["values"]), 2,
+                         f"Expected 2 points (pre- and post-rename): {series[0]['values']}")
+
+    def test_42_insert_after_rename_field(self):
+        """INSERT using new field name after RENAME FIELD writes to correct slot."""
+        DB = "e2e_db_insert_rename_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["sensors,tag=1 temp=1.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature", db=DB, method="POST")
+
+        insert_point("sensors,tag=1 temperature=2.0 2000000000", db=DB)
+        time.sleep(0.3)
+
+        res = query("SELECT temperature FROM sensors", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected series: {res}")
+        self.assertEqual(len(series[0]["values"]), 2,
+                         "Expected both points under 'temperature'")
+
+    def test_43_insert_after_rename_database(self):
+        """INSERT to renamed database lands in correct store."""
+        DB_ORIG = "e2e_db_insert_db_orig"
+        DB_NEW = "e2e_db_insert_db_new"
+        query(f"DROP DATABASE {DB_ORIG}", db="", method="POST")
+        query(f"DROP DATABASE {DB_NEW}", db="", method="POST")
+        query(f"CREATE DATABASE {DB_ORIG}", db="", method="POST")
+
+        write_points(["m1,tag=1 val=10.0 1000000000"], db=DB_ORIG)
+        time.sleep(0.3)
+        query(f"ALTER DATABASE {DB_ORIG} RENAME TO {DB_NEW}", db="", method="POST")
+
+        insert_point("m1,tag=1 val=20.0 2000000000", db=DB_NEW)
+        time.sleep(0.3)
+
+        res = query("SELECT val FROM m1", db=DB_NEW)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected series in renamed db: {res}")
+        self.assertEqual(len(series[0]["values"]), 2,
+                         "Expected 2 points in renamed database")
+
+    def test_44_insert_after_drop_field(self):
+        """INSERT same field name after DROP FIELD creates new slot; pre-drop data hidden."""
+        DB = "e2e_db_insert_drop_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["sensors,tag=1 temp=1.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("DROP FIELD temp FROM sensors", db=DB, method="POST")
+        time.sleep(0.3)
+
+        insert_point("sensors,tag=1 temp=99.0 2000000000", db=DB)
+        time.sleep(0.3)
+
+        res = query("SELECT temp FROM sensors", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected series: {res}")
+        values = series[0]["values"]
+        self.assertEqual(len(values), 1, "Expected only post-drop point")
+        self.assertAlmostEqual(values[0][1], 99.0, places=6,
+                               msg="Expected post-drop value 99.0")
+
+    def test_45_insert_after_rename_tag_key(self):
+        """INSERT with new tag key name after RENAME TAG KEY; both points accessible."""
+        DB = "e2e_db_insert_rename_tag"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=1.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.3)
+
+        insert_point("cpu,hostname=server01 load=2.0 2000000000", db=DB)
+        time.sleep(0.3)
+
+        res = query("SELECT load FROM cpu WHERE hostname='server01'", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"Expected series: {res}")
+        self.assertEqual(len(series[0]["values"]), 2,
+                         "Expected both pre- and post-rename points")
+
+    # --- SELECT INTO (simple) after rename/drop (tests 46-49) ---------
+
+    def test_46_select_into_after_rename_field(self):
+        """SELECT field INTO dest after RENAME FIELD writes with new user-facing name."""
+        DB = "e2e_db_into_rename_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["sensors,tag=1 temp=5.0 1000000000",
+                      "sensors,tag=1 temp=6.0 2000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature", db=DB, method="POST")
+
+        query("SELECT temperature INTO dest FROM sensors WHERE time > 0", db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest should have data: {res}")
+        self.assertIn("temperature", series[0]["columns"],
+                      "dest column should be 'temperature', not old internal name")
+        self.assertEqual(len(series[0]["values"]), 2,
+                         "dest should have both points")
+
+    def test_47_select_into_after_rename_database(self):
+        """SELECT INTO within a renamed database writes successfully."""
+        DB_ORIG = "e2e_db_into_db_orig"
+        DB_NEW = "e2e_db_into_db_new"
+        query(f"DROP DATABASE {DB_ORIG}", db="", method="POST")
+        query(f"DROP DATABASE {DB_NEW}", db="", method="POST")
+        query(f"CREATE DATABASE {DB_ORIG}", db="", method="POST")
+
+        write_points(["m1,tag=1 val=7.0 1000000000",
+                      "m1,tag=1 val=8.0 2000000000"], db=DB_ORIG)
+        time.sleep(0.3)
+        query(f"ALTER DATABASE {DB_ORIG} RENAME TO {DB_NEW}", db="", method="POST")
+
+        query("SELECT val INTO dest FROM autogen.m1 WHERE time > 0", db=DB_NEW, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB_NEW)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest in renamed db should have data: {res}")
+        self.assertEqual(len(series[0]["values"]), 2)
+
+    def test_48_select_into_after_drop_field(self):
+        """SELECT dropped field INTO dest produces no series."""
+        DB = "e2e_db_into_drop_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["sensors,tag=1 temp=1.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("DROP FIELD temp FROM sensors", db=DB, method="POST")
+
+        query("SELECT temp INTO dest FROM sensors WHERE time > 0", db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB)
+        self.assertNotIn("series", res["results"][0],
+                         "dest should be empty — dropped field has no data to copy")
+
+    def test_49_select_into_after_rename_tag_key(self):
+        """SELECT INTO after RENAME TAG KEY; dest has renamed tag key."""
+        DB = "e2e_db_into_rename_tag"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=3.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.3)
+
+        query("SELECT load INTO dest FROM cpu WHERE hostname='server01' AND time > 0 GROUP BY hostname",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE hostname='server01' AND time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1,
+                         f"dest should be queryable via renamed tag key 'hostname': {res}")
+        self.assertEqual(len(series[0]["values"]), 1,
+                         "Expected pre-rename point in dest with renamed tag key")
+
+    # --- SELECT * INTO (wildcard) after rename/drop (tests 50-54) -----
+
+    def test_50_wildcard_select_into_after_rename_measurement(self):
+        """SELECT * INTO dest after RENAME MEASUREMENT produces dest with data."""
+        DB = "e2e_db_wild_into_rename_meas"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["m_orig,tag=1 val=1.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT m_orig RENAME TO m_new", db=DB, method="POST")
+
+        query("SELECT * INTO dest FROM m_new WHERE time > 0", db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest should have data after wildcard INTO: {res}")
+
+    def test_51_wildcard_select_into_after_rename_field(self):
+        """SELECT * INTO dest after RENAME FIELD; dest column is new user-facing name."""
+        DB = "e2e_db_wild_into_rename_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["sensors,tag=1 temp=9.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature", db=DB, method="POST")
+
+        query("SELECT * INTO dest FROM sensors WHERE time > 0", db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest should have data: {res}")
+        cols = series[0]["columns"]
+        self.assertIn("temperature", cols,
+                      "dest should have 'temperature', not old internal name 'temp'")
+        self.assertNotIn("temp", cols,
+                         "dest should NOT have old internal name 'temp'")
+
+    def test_52_wildcard_select_into_after_rename_database(self):
+        """SELECT * INTO dest after RENAME DATABASE; dest in new db has all columns."""
+        DB_ORIG = "e2e_db_wild_into_db_orig"
+        DB_NEW = "e2e_db_wild_into_db_new"
+        query(f"DROP DATABASE {DB_ORIG}", db="", method="POST")
+        query(f"DROP DATABASE {DB_NEW}", db="", method="POST")
+        query(f"CREATE DATABASE {DB_ORIG}", db="", method="POST")
+
+        write_points(["m1,tag=1 val=11.0 1000000000"], db=DB_ORIG)
+        time.sleep(0.3)
+        query(f"ALTER DATABASE {DB_ORIG} RENAME TO {DB_NEW}", db="", method="POST")
+
+        query("SELECT * INTO dest FROM autogen.m1 WHERE time > 0", db=DB_NEW, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB_NEW)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest in renamed db should have data: {res}")
+
+    def test_53_wildcard_select_into_after_drop_field(self):
+        """SELECT * INTO dest after DROP FIELD; dest has surviving field but not dropped one."""
+        DB = "e2e_db_wild_into_drop_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["sensors,tag=1 temp=1.0,humidity=50.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("DROP FIELD temp FROM sensors", db=DB, method="POST")
+
+        query("SELECT * INTO dest FROM sensors WHERE time > 0", db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest should have surviving field: {res}")
+        cols = series[0]["columns"]
+        self.assertIn("humidity", cols, "dest should have 'humidity'")
+        self.assertNotIn("temp", cols, "dest should NOT have dropped field 'temp'")
+
+    def test_54_wildcard_select_into_after_rename_tag_key(self):
+        """SELECT * INTO dest after RENAME TAG KEY; dest has renamed tag, queryable by new name."""
+        DB = "e2e_db_wild_into_rename_tag"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=server01 load=4.0 1000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.3)
+
+        query("SELECT * INTO dest FROM cpu WHERE hostname='server01' AND time > 0 GROUP BY hostname",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE hostname='server01' AND time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1,
+                         f"dest should be queryable via 'hostname' tag key: {res}")
+        # Also confirm old tag key name is not exposed
+        res_old = query("SELECT * FROM dest WHERE host='server01' AND time > 0", db=DB)
+        self.assertNotIn("series", res_old["results"][0],
+                         "dest should NOT be queryable via old tag key 'host'")
+
+    # --- SELECT INTO with nested aggregate (tests 55-56) --------------
+
+    def test_55_nested_fn_select_into_after_rename_field(self):
+        """SELECT mean(field) INTO after RENAME FIELD; result column is 'mean', not re-translated."""
+        DB = "e2e_db_fn_into_rename_field"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points([f"sensors,tag=1 temp={float(i)} {i}000000000"
+                      for i in range(1, 4)], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT sensors RENAME FIELD temp TO temperature", db=DB, method="POST")
+
+        query("SELECT mean(temperature) INTO dest FROM sensors "
+              "WHERE time >= 1000000000 AND time <= 3000000000 GROUP BY time(1s)",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT * FROM dest WHERE time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1, f"dest should have aggregated data: {res}")
+        cols = series[0]["columns"]
+        self.assertIn("mean", cols,
+                      "dest column should be 'mean' (function name), not re-translated field name")
+        self.assertNotIn("temperature", cols,
+                         "field name 'temperature' should not appear as a column in dest")
+        self.assertNotIn("temp", cols,
+                         "internal name 'temp' should not appear as a column in dest")
+
+    def test_56_nested_fn_select_into_group_by_renamed_tag(self):
+        """SELECT mean(field) INTO dest GROUP BY renamed tag; dest has correct tag key."""
+        DB = "e2e_db_fn_into_rename_tag"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        write_points(["cpu,host=s01 load=10.0 1000000000",
+                      "cpu,host=s01 load=20.0 2000000000"], db=DB)
+        time.sleep(0.3)
+        query("ALTER MEASUREMENT cpu RENAME TAG KEY host TO hostname", db=DB, method="POST")
+        time.sleep(0.3)
+
+        query("SELECT mean(load) INTO dest FROM cpu WHERE hostname='s01' AND time > 0 GROUP BY hostname",
+              db=DB, method="POST")
+        time.sleep(0.3)
+
+        res = query("SELECT mean FROM dest WHERE hostname='s01' AND time > 0", db=DB)
+        series = res["results"][0].get("series", [])
+        self.assertEqual(len(series), 1,
+                         f"dest should be queryable via 'hostname' after GROUP BY rename: {res}")
+        self.assertAlmostEqual(series[0]["values"][0][1], 15.0, places=6,
+                               msg="Expected mean(load) = 15.0 (mean of 10, 20)")
+
+    # --- Cascaded rename: internal name == active user name (test 57) -
+
+    def test_57_cascaded_rename_internal_name_matches_active_user_name(self):
+        """
+        Build the chain internal(a)→user(b), internal(b)→user(c), internal(c)→user(d).
+        Then run a subquery whose alias is an internal name that is also an active
+        user name in another mapping.  Verifies translation is single-level only.
+
+        Subqueries tested:
+          SELECT b FROM (SELECT c AS b FROM m)
+            inner: user c → internal b, alias → b
+            outer: column b — if double-mapped through ByUser would return internal-a data (val=10)
+            correct: returns internal-b data (val=20)
+
+          SELECT c FROM (SELECT d AS c FROM m)
+            inner: user d → internal c, alias → c
+            outer: column c — if double-mapped through ByUser would return internal-b data (val=20)
+            correct: returns internal-c data (val=30)
+        """
+        DB = "e2e_db_cascade_double_map"
+        query(f"DROP DATABASE {DB}", db="", method="POST")
+        query(f"CREATE DATABASE {DB}", db="", method="POST")
+
+        # Write three fields: internal a=10, internal b=20, internal c=30
+        write_points(["m,tag=1 a=10.0 1000000000",
+                      "m,tag=1 b=20.0 2000000000",
+                      "m,tag=1 c=30.0 3000000000"], db=DB)
+        time.sleep(0.3)
+
+        # Rename all three via temporaries to avoid active-name conflicts,
+        # resulting in: ByUser = {b: a, c: b, d: c}
+        query("ALTER MEASUREMENT m RENAME FIELD a TO tmp_a", db=DB, method="POST")
+        query("ALTER MEASUREMENT m RENAME FIELD b TO tmp_b", db=DB, method="POST")
+        query("ALTER MEASUREMENT m RENAME FIELD c TO tmp_c", db=DB, method="POST")
+        query("ALTER MEASUREMENT m RENAME FIELD tmp_a TO b", db=DB, method="POST")
+        query("ALTER MEASUREMENT m RENAME FIELD tmp_b TO c", db=DB, method="POST")
+        query("ALTER MEASUREMENT m RENAME FIELD tmp_c TO d", db=DB, method="POST")
+        time.sleep(0.3)
+
+        # Sanity check: direct queries return the right values.
+        for user_name, expected in [("b", 10.0), ("c", 20.0), ("d", 30.0)]:
+            r = query(f"SELECT {user_name} FROM m", db=DB)
+            s = r["results"][0].get("series", [])
+            self.assertEqual(len(s), 1,
+                             f"Direct query for '{user_name}' should return data: {r}")
+            self.assertAlmostEqual(s[0]["values"][0][1], expected, places=6,
+                                   msg=f"Direct query '{user_name}' expected {expected}")
+
+        # Subquery 1: alias 'b' is also an active user name → double-map risk
+        # inner: user c → internal b (val=20), alias → b
+        # correct outer result: 20.0  |  double-mapped result: 10.0 (wrong)
+        res1 = query("SELECT b FROM (SELECT c AS b FROM m)", db=DB)
+        s1 = res1["results"][0].get("series", [])
+        self.assertEqual(len(s1), 1, f"Subquery 1 should return data: {res1}")
+        val1 = s1[0]["values"][0][1]
+        self.assertAlmostEqual(val1, 20.0, places=6,
+                               msg=f"Subquery alias 'b' should resolve to inner result "
+                                   f"(20.0), not double-mapped to internal-a (10.0); got {val1}")
+
+        # Subquery 2: alias 'c' is also an active user name → double-map risk
+        # inner: user d → internal c (val=30), alias → c
+        # correct outer result: 30.0  |  double-mapped result: 20.0 (wrong)
+        res2 = query("SELECT c FROM (SELECT d AS c FROM m)", db=DB)
+        s2 = res2["results"][0].get("series", [])
+        self.assertEqual(len(s2), 1, f"Subquery 2 should return data: {res2}")
+        val2 = s2[0]["values"][0][1]
+        self.assertAlmostEqual(val2, 30.0, places=6,
+                               msg=f"Subquery alias 'c' should resolve to inner result "
+                                   f"(30.0), not double-mapped to internal-b (20.0); got {val2}")
 
 
 if __name__ == "__main__":
